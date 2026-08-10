@@ -1,0 +1,72 @@
+"""FastAPI app factory: CORS, request-ID middleware, router mounting.
+
+Error handling (the closed code set from contract §7.4) lives in
+`app.errors.register_exception_handlers` — this file only wires it in.
+"""
+
+from __future__ import annotations
+
+import logging
+import secrets
+import time
+from collections.abc import Awaitable, Callable
+
+from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.config import get_settings
+from app.errors import REQUEST_ID_HEADER, register_exception_handlers
+from app.routers import health
+
+logger = logging.getLogger("app")
+
+
+def create_app() -> FastAPI:
+    settings = get_settings()
+
+    app = FastAPI(
+        title="SUN-DRAM Scanner API",
+        version="1.0.0",
+        docs_url="/api/docs" if settings.app_env != "production" else None,
+        redoc_url=None,
+    )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins_list,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
+        expose_headers=[REQUEST_ID_HEADER],
+    )
+
+    @app.middleware("http")
+    async def request_id_middleware(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        request_id = f"req_{secrets.token_hex(4)}"
+        request.state.request_id = request_id
+        start = time.perf_counter()
+        response = await call_next(request)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        response.headers[REQUEST_ID_HEADER] = request_id
+        logger.info(
+            "request",
+            extra={
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": response.status_code,
+                "duration_ms": duration_ms,
+            },
+        )
+        return response
+
+    register_exception_handlers(app)
+
+    app.include_router(health.router, prefix="/api/v1")
+
+    return app
+
+
+app = create_app()

@@ -1,0 +1,35 @@
+# --- env ---
+.env
+.env.local
+.env.*.local
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# --- node / next ---
+node_modules/
+.next/
+out/
+dist/
+.turbo/
+next-env.d.ts
+
+# --- editors / os ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- logs ---
+*.log
+npm-debug.log*
+pnpm-debug.log*

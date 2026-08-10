@@ -610,7 +610,7 @@ The scanner accepts arbitrary user input and makes network requests. It is an SS
 
 1. **Resolve first, then check.** Resolve the hostname to IPs *before* connecting, and reject if any resolved address is in: `10/8`, `172.16/12`, `192.168/16`, `127/8`, `169.254/16`, `100.64/10`, `0/8`, `::1`, `fc00::/7`, `fe80::/10`. Error: `BLOCKED_TARGET`.
 2. **Pin the connection to the checked IP.** Connect to the validated address directly rather than re-resolving, to close the DNS-rebinding window.
-3. **Ports.** Only `443` and `8443` are permitted in Phase 1. Anything else → `BLOCKED_TARGET`.
+3. **Ports.** Only `443` and `8443` are permitted in Phase 1. Anything else → `BLOCKED_TARGET`. **Exception (v1.1):** the `headers` module's plaintext HTTP→HTTPS redirect probe (§6.4 `headers.data.redirect_chain`, `http_to_https_redirect`) is additionally allowed to use port `80`, for the initial `GET http://hostname/` and for any further `http://` hops within that same probe's own redirect chain (still capped at 5 redirects, still resolve-then-validate and IP-pinned on every hop per rules 1, 2 and 4). Port `80` is not accepted anywhere else: not in `POST /api/v1/scans`, not for certificate/chain/TLS connections.
 4. **Redirects.** Follow at most 5, revalidate the target of each hop against rule 1, never follow to a non-HTTP(S) scheme.
 5. **Timeouts.** Per-module hard timeout of 8 s, whole-scan budget `SCAN_TIMEOUT_SECONDS`. A module that times out is `status: "error"`, never a hung request.
 6. **Response size cap.** Read at most 512 KB of any HTTP body.
@@ -719,3 +719,4 @@ A phase is complete only when all of these are true:
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 2026-08-09 | Initial contract. Phase 1 scope. |
+| 1.1 | 2026-08-10 | §10 rule 3: port `80` additionally permitted, scoped to the `headers` module's HTTP→HTTPS redirect probe only. Raised as a build-time contradiction between §6.4 `headers.data` and the original port allowlist; resolved by the human. |

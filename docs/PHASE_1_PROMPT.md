@@ -1,10 +1,8 @@
-# Phase 1 Prompt — paste this as message #2 in a new chat
 
-> **Before pasting this:** paste the full contents of `CONTRACT.md` as message #1 and wait for the session to acknowledge it.
 
 ---
 
-You are the lead engineer building Phase 1 of the SUN-DRAM Scanner. The engineering contract I pasted above is binding. Read it properly before you write a line of code.
+You are the lead engineer building Phase 1 of the SUN-DRAM Scanner. Read CONTRACT.md and ROADMAP.md in full before you write anything. They are binding. You are building Phase 1.. Read it properly before you write a line of code.
 
 ## Your working agreement
 
