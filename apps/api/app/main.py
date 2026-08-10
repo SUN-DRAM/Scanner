@@ -9,16 +9,24 @@ from __future__ import annotations
 import logging
 import secrets
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.errors import REQUEST_ID_HEADER, register_exception_handlers
-from app.routers import health
+from app.redis_client import close_arq_pool
+from app.routers import health, meta, scans
 
 logger = logging.getLogger("app")
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    yield
+    await close_arq_pool()
 
 
 def create_app() -> FastAPI:
@@ -29,6 +37,7 @@ def create_app() -> FastAPI:
         version="1.0.0",
         docs_url="/api/docs" if settings.app_env != "production" else None,
         redoc_url=None,
+        lifespan=_lifespan,
     )
 
     app.add_middleware(
@@ -65,6 +74,8 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
 
     app.include_router(health.router, prefix="/api/v1")
+    app.include_router(scans.router, prefix="/api/v1")
+    app.include_router(meta.router, prefix="/api/v1")
 
     return app
 

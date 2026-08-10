@@ -298,6 +298,7 @@ _PROTOCOL_VERSION_MAP: dict[str, int] = {
     "tls1_3": openssl_ssl.TLS1_3_VERSION,
 }
 
+
 @dataclass(frozen=True)
 class PinnedTlsHandshakeResult:
     chain: tuple[x509.Certificate, ...]  # leaf first, then intermediates, then root if sent

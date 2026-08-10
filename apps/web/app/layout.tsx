@@ -1,5 +1,9 @@
 import type { Metadata } from "next";
 import { Inter, JetBrains_Mono, Space_Grotesk } from "next/font/google";
+
+import { Footer } from "@/components/layout/Footer";
+import { Header } from "@/components/layout/Header";
+
 import "./globals.css";
 
 const spaceGrotesk = Space_Grotesk({
@@ -20,8 +24,14 @@ const jetbrainsMono = JetBrains_Mono({
   display: "swap",
 });
 
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
+
 export const metadata: Metadata = {
-  title: "SUN-DRAM Scanner",
+  metadataBase: new URL(SITE_URL),
+  title: {
+    default: "SUN-DRAM Scanner",
+    template: "%s | SUN-DRAM Scanner",
+  },
   description: "Free TLS and DNS scanner. Enter a hostname, get a graded report, share the link.",
 };
 
@@ -33,9 +43,11 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${spaceGrotesk.variable} ${inter.variable} ${jetbrainsMono.variable} font-body`}
+        className={`${spaceGrotesk.variable} ${inter.variable} ${jetbrainsMono.variable} flex min-h-screen flex-col bg-paper font-body text-ink`}
       >
-        {children}
+        <Header />
+        <div className="flex-1">{children}</div>
+        <Footer />
       </body>
     </html>
   );

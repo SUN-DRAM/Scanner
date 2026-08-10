@@ -111,7 +111,5 @@ def test_build_finding_raises_clear_error_for_missing_evidence() -> None:
 
 
 def test_build_finding_allows_severity_override() -> None:
-    finding = build_finding(
-        "DNS_NO_DNSSEC", {"hostname": "example.com"}, severity=Severity.MEDIUM
-    )
+    finding = build_finding("DNS_NO_DNSSEC", {"hostname": "example.com"}, severity=Severity.MEDIUM)
     assert finding.severity == Severity.MEDIUM

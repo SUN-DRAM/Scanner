@@ -85,8 +85,10 @@ async def _count_spf_lookups(
     count = 0
     for token in record.split():
         for mechanism in _SPF_LOOKUP_MECHANISMS:
-            if token == mechanism or token.startswith(f"{mechanism}:") or token.startswith(
-                f"{mechanism}/"
+            if (
+                token == mechanism
+                or token.startswith(f"{mechanism}:")
+                or token.startswith(f"{mechanism}/")
             ):
                 count += 1
                 if mechanism in ("include", "redirect") and ":" in token:

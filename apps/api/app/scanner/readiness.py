@@ -154,8 +154,7 @@ def _message_for(
 ) -> str:
     if verdict == ReadinessVerdict.UNKNOWN:
         return (
-            "Run the certificate check again to see how this hostname's renewals will be "
-            "affected."
+            "Run the certificate check again to see how this hostname's renewals will be affected."
         )
     if verdict == ReadinessVerdict.AUTOMATED:
         return (
@@ -248,6 +247,4 @@ async def run(
     async def _bound_detect(context: ScanContext) -> tuple[ReadinessData, list[Finding], str]:
         return await _detect(context, certificate_result)
 
-    return await run_module(
-        module=ModuleName.READINESS, label=LABEL, ctx=ctx, detect=_bound_detect
-    )
+    return await run_module(module=ModuleName.READINESS, label=LABEL, ctx=ctx, detect=_bound_detect)

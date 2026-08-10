@@ -50,7 +50,9 @@ async def _detect(ctx: ScanContext) -> tuple[HeadersData, list[Finding], str]:
     https_result = await safe_get("https", ctx.hostname, ctx.port, "/")
 
     headers = {name.lower(): value for name, value in https_result.headers.items()}
-    http_to_https_redirect = http_result is not None and http_result.final_url.startswith("https://")
+    http_to_https_redirect = http_result is not None and http_result.final_url.startswith(
+        "https://"
+    )
     redirect_chain = (
         http_result.redirect_chain if http_result is not None else https_result.redirect_chain
     )

@@ -51,9 +51,7 @@ def _clean_inputs(
 ) -> list[ModuleScoreInput]:
     overrides = overrides or {}
     return [
-        ModuleScoreInput(
-            module=module, status=ModuleStatus.OK, findings=overrides.get(module, [])
-        )
+        ModuleScoreInput(module=module, status=ModuleStatus.OK, findings=overrides.get(module, []))
         for module in ALL_MODULES
     ]
 

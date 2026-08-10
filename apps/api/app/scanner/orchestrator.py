@@ -36,7 +36,9 @@ from app.schemas import CertificateData, ModuleResult, Modules, ReadinessData, S
 
 logger = logging.getLogger("app.scanner.orchestrator")
 
-_EMPTY_MODULES = Modules(
+# Public: reused by routers/scans.py (Step 6) for the queued/running Scan
+# shape and the share_url, so there is exactly one place either is built.
+EMPTY_MODULES = Modules(
     certificate=None,
     chain=None,
     tls=None,
@@ -47,7 +49,7 @@ _EMPTY_MODULES = Modules(
 )
 
 
-def _share_url(record: ScanRecord) -> str:
+def share_url(record: ScanRecord) -> str:
     base = get_settings().public_base_url.rstrip("/")
     return f"{base}/scan/{record.public_slug}"
 
@@ -128,9 +130,9 @@ async def _mark_failed(
         overall_grade=None,
         overall_score=None,
         headline=None,
-        share_url=_share_url(record),
+        share_url=share_url(record),
         counts=None,
-        modules=_EMPTY_MODULES,
+        modules=EMPTY_MODULES,
         findings=[],
         error=ApiError(
             code=error_code,
@@ -228,7 +230,7 @@ async def _run_and_persist(
         overall_grade=grading_result.overall_grade,
         overall_score=grading_result.overall_score,
         headline=grading_result.headline,
-        share_url=_share_url(record),
+        share_url=share_url(record),
         counts=SeverityCounts(
             critical=grading_result.counts[Severity.CRITICAL],
             high=grading_result.counts[Severity.HIGH],

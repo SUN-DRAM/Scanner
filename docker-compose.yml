@@ -89,6 +89,7 @@ services:
       - ./apps/web:/app
       - /app/node_modules
       - /app/.next
+      - ./docs:/app/docs:ro
     depends_on:
       - api
     command: pnpm dev

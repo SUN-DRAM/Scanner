@@ -16,13 +16,7 @@ export type Severity = "critical" | "high" | "medium" | "low" | "info";
 export type Grade = "A+" | "A" | "B" | "C" | "D" | "E" | "F";
 
 export type ModuleName =
-  | "certificate"
-  | "chain"
-  | "tls"
-  | "dns"
-  | "email_auth"
-  | "headers"
-  | "readiness";
+  "certificate" | "chain" | "tls" | "dns" | "email_auth" | "headers" | "readiness";
 
 export type ReadinessVerdict = "automated" | "semi_automated" | "manual" | "unknown";
 

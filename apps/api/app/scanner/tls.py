@@ -92,11 +92,7 @@ async def _detect(ctx: ScanContext) -> tuple[TlsData, list[Finding], str]:
     findings: list[Finding] = []
     base_evidence = {"hostname": ctx.hostname}
 
-    legacy_enabled = [
-        _PROTOCOL_LABELS[key]
-        for key in ("tls1_0", "tls1_1")
-        if support_by_key[key]
-    ]
+    legacy_enabled = [_PROTOCOL_LABELS[key] for key in ("tls1_0", "tls1_1") if support_by_key[key]]
     if legacy_enabled:
         findings.append(
             build_finding(

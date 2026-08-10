@@ -122,8 +122,7 @@ _DEFINITIONS: tuple[FindingDefinition, ...] = (
             "usually needs to happen before day 30 to leave room for failure."
         ),
         remediation_template=(
-            "Set up automated renewal, or renew now and add an expiry alert at 30, 14 and 7 "
-            "days."
+            "Set up automated renewal, or renew now and add an expiry alert at 30, 14 and 7 days."
         ),
     ),
     FindingDefinition(
@@ -330,7 +329,7 @@ _DEFINITIONS: tuple[FindingDefinition, ...] = (
             "certificate authority is allowed to issue certificates for it."
         ),
         remediation_template=(
-            'Add a CAA record naming the certificate authority you actually use, for '
+            "Add a CAA record naming the certificate authority you actually use, for "
             'example: 0 issue "letsencrypt.org".'
         ),
     ),
