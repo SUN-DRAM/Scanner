@@ -1,6 +1,6 @@
 line-length = 100
 target-version = "py312"
-src = ["apps/api/app", "apps/api/tests"]
+src = ["app", "tests"]
 
 [lint]
 select = [
