@@ -34,3 +34,6 @@ Thumbs.db
 *.log
 npm-debug.log*
 pnpm-debug.log*
+
+# --- docker (local-only overrides, e.g. host-specific port remaps) ---
+docker-compose.override.yml
