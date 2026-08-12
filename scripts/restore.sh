@@ -36,15 +36,11 @@ source "$ENV_FILE"
 set +a
 
 : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}"
-: "${DO_SPACES_BUCKET:?DO_SPACES_BUCKET must be set in .env}"
-: "${DO_SPACES_ENDPOINT:?DO_SPACES_ENDPOINT must be set in .env}"
-: "${DO_SPACES_REGION:?DO_SPACES_REGION must be set in .env}"
-: "${DO_SPACES_ACCESS_KEY_ID:?DO_SPACES_ACCESS_KEY_ID must be set in .env}"
-: "${DO_SPACES_SECRET_ACCESS_KEY:?DO_SPACES_SECRET_ACCESS_KEY must be set in .env}"
+: "${S3_BACKUP_BUCKET:?S3_BACKUP_BUCKET must be set in .env}"
 
-export AWS_ACCESS_KEY_ID="$DO_SPACES_ACCESS_KEY_ID"
-export AWS_SECRET_ACCESS_KEY="$DO_SPACES_SECRET_ACCESS_KEY"
-export AWS_DEFAULT_REGION="$DO_SPACES_REGION"
+# Credentials come from the EC2 instance's IAM role, not from .env — see the
+# comment in backup.sh.
+AWS_REGION="${AWS_REGION:-ap-south-1}"
 
 BACKUP_ARG="${1:-latest}"
 TARGET="scratch"
@@ -62,8 +58,8 @@ fi
 # --- resolve which backup to restore ---
 
 if [[ "$BACKUP_ARG" == "latest" || "$BACKUP_ARG" == --target=* ]]; then
-    echo "restore.sh: resolving latest backup in s3://${DO_SPACES_BUCKET}/backups/..."
-    DUMP_NAME="$(aws s3 ls "s3://${DO_SPACES_BUCKET}/backups/" --endpoint-url "$DO_SPACES_ENDPOINT" \
+    echo "restore.sh: resolving latest backup in s3://${S3_BACKUP_BUCKET}/backups/..."
+    DUMP_NAME="$(aws s3 ls "s3://${S3_BACKUP_BUCKET}/backups/" --region "$AWS_REGION" \
         | awk '{print $4}' | grep '^scanner-' | sort | tail -n1)"
     if [[ -z "$DUMP_NAME" ]]; then
         echo "restore.sh: no backups found in the bucket." >&2
@@ -82,8 +78,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-aws s3 cp "s3://${DO_SPACES_BUCKET}/backups/${DUMP_NAME}" "$LOCAL_DUMP" \
-    --endpoint-url "$DO_SPACES_ENDPOINT" \
+aws s3 cp "s3://${S3_BACKUP_BUCKET}/backups/${DUMP_NAME}" "$LOCAL_DUMP" \
+    --region "$AWS_REGION" \
     --only-show-errors
 
 # --- scratch: a disposable container, never the live database ---

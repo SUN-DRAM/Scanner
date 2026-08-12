@@ -155,6 +155,14 @@ async def test_resolve_and_validate_rejects_loopback_ip_literal() -> None:
     assert exc_info.value.code == ErrorCode.BLOCKED_TARGET
 
 
+@pytest.mark.asyncio
+async def test_resolve_and_validate_rejects_own_public_ip_literal() -> None:
+    """Phase 2 Step 0.1: our own Elastic IP, submitted directly, is blocked."""
+    with pytest.raises(ApiException) as exc_info:
+        await resolve_and_validate("65.2.195.179")
+    assert exc_info.value.code == ErrorCode.BLOCKED_TARGET
+
+
 # --- §10 rule 8: static host denylist ---
 
 

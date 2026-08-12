@@ -25,7 +25,6 @@ import idna
 from cryptography import x509
 from OpenSSL import SSL as openssl_ssl
 
-from app.config import get_settings
 from app.errors import ApiException, ErrorCode
 
 # --- §7.2 hostname normalisation ---
@@ -155,23 +154,29 @@ STATIC_HOST_DENYLIST: frozenset[str] = frozenset(
 )
 
 
-def _own_infrastructure_hosts() -> frozenset[str]:
-    """Hosts derived from our own configured URLs — we never scan ourselves."""
-    settings = get_settings()
-    hosts: set[str] = set()
-    for url in (settings.public_base_url, *settings.cors_origins_list):
-        candidate = url if "//" in url else f"//{url}"
-        hostname = urlsplit(candidate).hostname
-        if hostname:
-            hosts.add(hostname.lower())
-    return frozenset(hosts)
-
-
 def is_denylisted_hostname(hostname: str) -> bool:
-    denylist = STATIC_HOST_DENYLIST | _own_infrastructure_hosts()
+    # Deliberately NOT derived from settings.public_base_url / cors_origins_list
+    # (that was Phase 1's approach): once those correctly point at
+    # sundram.tech, deriving the denylist from them would denylist our own
+    # product domain by hostname — breaking the credibility-check self-scan
+    # and any real visitor who wants to check our own site, which is exactly
+    # the behaviour Phase 2 Step 0.1 and Step 0.4 require working. See
+    # OWN_PUBLIC_IPS below for the actual "don't let this be pointed at our
+    # own infrastructure" guard: it blocks the literal IP, not the hostname.
+    denylist = STATIC_HOST_DENYLIST
     if hostname in denylist:
         return True
     return any(hostname.endswith(f".{suffix}") for suffix in denylist)
+
+
+# Phase 2 Step 0.1. Our production server's own public address (Elastic IP,
+# ap-south-1). Rejected only when submitted as a literal IP address — a
+# hostname that happens to resolve to it (sundram.tech itself) must stay
+# scannable, since the public product's own credibility check, and any
+# visitor doing the same thing, depends on being able to scan our own
+# domain. The private VPC range (172.31.0.0/16) needs no separate entry
+# here: it already falls inside BLOCKED_NETWORKS' 172.16.0.0/12 block.
+OWN_PUBLIC_IPS: frozenset[str] = frozenset({"65.2.195.179"})
 
 
 # --- §10 rules 1+2: resolve-then-validate, with IP pinning ---
@@ -234,6 +239,15 @@ async def resolve_and_validate(hostname: str) -> ResolvedTarget:
     (§10 rule 2). Raises ApiException(BLOCKED_TARGET) or HostnameResolutionError.
     """
     if is_denylisted_hostname(hostname):
+        raise ApiException(
+            ErrorCode.BLOCKED_TARGET, f"'{hostname}' cannot be scanned.", {"hostname": hostname}
+        )
+
+    try:
+        literal_ip = str(ipaddress.ip_address(hostname))
+    except ValueError:
+        literal_ip = None
+    if literal_ip is not None and literal_ip in OWN_PUBLIC_IPS:
         raise ApiException(
             ErrorCode.BLOCKED_TARGET, f"'{hostname}' cannot be scanned.", {"hostname": hostname}
         )

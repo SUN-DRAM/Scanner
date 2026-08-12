@@ -23,6 +23,7 @@ out/
 dist/
 .turbo/
 next-env.d.ts
+.pnpm-store/
 
 # --- editors / os ---
 .vscode/
