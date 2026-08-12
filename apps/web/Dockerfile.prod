@@ -1,0 +1,76 @@
+# Gate C: production build. Dockerfile (no suffix) is deliberately dev-mode
+# (`pnpm dev`, full source bind-mounted by docker-compose.yml) — this file
+# runs `next build` with `output: "standalone"` (next.config.ts) and ships
+# only the traced, minimal server output, not the full node_modules tree.
+# docker-compose.prod.yml builds this file instead.
+
+# --- deps ---
+FROM node:20-alpine AS deps
+
+WORKDIR /app
+
+RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
+
+COPY package.json pnpm-lock.yaml* ./
+RUN pnpm install --frozen-lockfile
+
+# --- builder ---
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Baked into the client bundle at build time — Next.js public env vars are
+# not readable from a running container's environment the way the API's
+# Pydantic settings are, so they must be present here, not just at `docker
+# run` time. SENTRY_AUTH_TOKEN/SENTRY_ORG/SENTRY_PROJECT are for source-map
+# upload only (next.config.ts); all three are optional and the build
+# succeeds without them (see the `silent: true` note there).
+ARG NEXT_PUBLIC_API_BASE_URL
+ARG NEXT_PUBLIC_SITE_URL
+ARG NEXT_PUBLIC_SENTRY_DSN
+ARG SENTRY_AUTH_TOKEN
+ARG SENTRY_ORG
+ARG SENTRY_PROJECT
+ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL \
+    NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL \
+    NEXT_PUBLIC_SENTRY_DSN=$NEXT_PUBLIC_SENTRY_DSN \
+    SENTRY_AUTH_TOKEN=$SENTRY_AUTH_TOKEN \
+    SENTRY_ORG=$SENTRY_ORG \
+    SENTRY_PROJECT=$SENTRY_PROJECT \
+    SENTRY_SUPPRESS_GLOBAL_ERROR_HANDLER_FILE_WARNING=1
+
+RUN pnpm build
+
+# --- runtime ---
+FROM node:20-alpine AS runtime
+
+WORKDIR /app
+
+# node:alpine already ships a uid/gid-1000 "node" user — reused rather than
+# creating a second one at the same id, which the base image's own group
+# already occupies.
+
+# Standalone output needs its static assets and public/ copied in
+# separately — Next.js's own documented layout for this mode, not an
+# omission in the trace step.
+COPY --from=builder --chown=node:node /app/.next/standalone ./
+COPY --from=builder --chown=node:node /app/.next/static ./.next/static
+COPY --from=builder --chown=node:node /app/public ./public
+
+USER node
+
+ENV NODE_ENV=production \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=5 \
+    CMD node -e "require('http').get('http://localhost:3000/', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"
+
+CMD ["node", "server.js"]

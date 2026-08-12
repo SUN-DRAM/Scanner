@@ -10,9 +10,34 @@ import type {
   Scan,
   ScanCreateRequest,
   ScanCreateResponse,
+  WaitlistCreateRequest,
+  WaitlistCreateResponse,
 } from "@/types/contract";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+/**
+ * Contract §4 gives the frontend exactly one API variable,
+ * `NEXT_PUBLIC_API_BASE_URL` — but that's the address a *browser* should
+ * use, and server-side code (`window` is undefined in Node) always runs
+ * inside the `web` container itself, which is always a Docker Compose
+ * sibling of `api`, in dev and in production alike. Routing a server-side
+ * fetch through the public URL instead is both wasteful — a public-internet
+ * round trip to reach a container one hop away — and, on many cloud
+ * providers, outright broken: a server frequently cannot reach its own
+ * public IP from inside itself (no hairpin NAT), so this would fail exactly
+ * when it matters most, the very first self-render right after DNS goes
+ * live. (Confirmed live: with `NEXT_PUBLIC_API_BASE_URL` set to the real
+ * production domain, every server-rendered page 500'd with a connect
+ * timeout until this was fixed to always use the internal service name
+ * server-side, unconditionally — not just for the `localhost` dev case.)
+ */
+function resolveApiBaseUrl(): string {
+  if (typeof window === "undefined") {
+    return "http://api:8000";
+  }
+  return process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+}
+
+const API_BASE_URL = resolveApiBaseUrl();
 
 export class ApiRequestError extends Error {
   readonly status: number;
@@ -77,6 +102,13 @@ export function getScanBySlug(slug: string): Promise<Scan> {
 
 export function getDeadlines(): Promise<MetaDeadlines> {
   return apiFetch<MetaDeadlines>("/api/v1/meta/deadlines");
+}
+
+export function submitWaitlist(request: WaitlistCreateRequest): Promise<WaitlistCreateResponse> {
+  return apiFetch<WaitlistCreateResponse>("/api/v1/waitlist", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
 }
 
 /** Mirrors `apps/api/app/routers/health.py`'s `HealthResponse` — an ad hoc

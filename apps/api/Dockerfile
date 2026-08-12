@@ -10,7 +10,12 @@ RUN apt-get update \
 COPY pyproject.toml ./
 COPY app ./app
 
-RUN pip install --no-cache-dir --prefix=/install .
+# docker-compose.yml's api/worker services are dev-mode (--reload, bind
+# mounts) and CLAUDE.md documents `docker compose exec api pytest` /
+# `ruff` / `mypy` as the standard workflow against this exact image, so
+# the dev extras belong in the image this Dockerfile builds. Gate C's
+# docker-compose.prod.yml is expected to build a leaner variant.
+RUN pip install --no-cache-dir --prefix=/install .[dev]
 
 # --- runtime ---
 FROM python:3.12-slim AS runtime

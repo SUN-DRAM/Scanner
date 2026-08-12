@@ -147,10 +147,13 @@ SCAN_CACHE_TTL_SECONDS=900
 RATE_LIMIT_PER_IP_PER_HOUR=20
 RATE_LIMIT_PER_HOSTNAME_PER_HOUR=6
 PUBLIC_BASE_URL=http://localhost:3000
+ADMIN_TOKEN=                        # Gate B: gates GET /api/v1/admin/stats. Empty = endpoint always 403.
+SENTRY_DSN=                         # Gate C: error tracking (api + worker). Empty = Sentry never initialised.
 
 # --- web ---
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 NEXT_PUBLIC_SITE_URL=http://localhost:3000
+NEXT_PUBLIC_SENTRY_DSN=             # Gate C: error tracking (browser/server/edge). Empty = Sentry never initialised.
 ```
 
 The frontend reads exactly one API variable: `NEXT_PUBLIC_API_BASE_URL`. It never hardcodes a URL.
@@ -317,9 +320,11 @@ Rules:
   "negotiated_cipher": "TLS_AES_256_GCM_SHA384",
   "weak_ciphers": [],
   "forward_secrecy": true,
-  "supports_renegotiation": false
+  "supports_renegotiation": false,
+  "key_exchange": { "type": "ECDHE", "bits": 256, "curve": "X25519" }
 }
 ```
+`key_exchange` (v1.4, Gate A follow-up A2): every field nullable when not determinable. `type` comes from the negotiated cipher suite name and is reliable for TLS ≤ 1.2; TLS 1.3 suite names don't encode it, so `type` is `null` there. `bits`/`curve` require reading the negotiated DH/ECDHE group, which this stack's TLS library (pyOpenSSL) has no public getter for — confirmed by direct introspection of its bound OpenSSL bindings, not assumed — so they are `null` in every live scan today. Never guessed (§10): `TLS_WEAK_KEY_EXCHANGE` (§8) only fires when `bits` is actually known.
 
 **`dns.data`**
 ```jsonc
@@ -367,6 +372,7 @@ DKIM is best-effort selector probing. `selectors_found: []` produces an `info` f
   "missing": ["content_security_policy", "x_frame_options", "permissions_policy"]
 }
 ```
+Redirect-chain semantics (v1.2): the `headers` module makes two probes — an HTTP probe starting at `http://{hostname}/` and an HTTPS probe starting at `https://{hostname}/` — and follows redirects on each, up to §10 rule 4's cap, revalidating every hop. When a redirect crosses to a different hostname (the common `example.com` → `www.example.com` case), every header field in this payload — `hsts`, `content_security_policy`, every other presence field, `server_header`, `missing` — is evaluated on the **final hop's response**, not the originally-requested host. `final_url` always names that final hop, so the response makes the substitution visible instead of hiding it. `http_to_https_redirect` is `true` only when the HTTP probe's own chain ends on an `https://` URL. A blocked or challenge response (a WAF/bot-management page, not the real origin) is a fetch failure the module cannot distinguish from a genuine missing header from response headers alone — see §10 rule 10 on the User-Agent it sends to reduce this — but a request-level exception (timeout, connection refused, TLS failure) still produces `status: "error"` per §6.2, never a confident `false`.
 
 **`readiness.data`** — the product's signature output
 ```jsonc
@@ -423,6 +429,8 @@ Base path `/api/v1`. All responses `application/json`.
 | GET | `/api/v1/scans/{scan_id}` | poll / fetch by id | 200 |
 | GET | `/api/v1/scans/slug/{public_slug}` | fetch by shareable slug | 200 |
 | GET | `/api/v1/meta/deadlines` | countdown data | 200 |
+| POST | `/api/v1/waitlist` | capture an email against a scan (Gate B) | 200 |
+| GET | `/api/v1/admin/stats` | plain-text usage counters, `?token=` gated (Gate B) — the one exception to "all responses `application/json`": this returns `text/plain`, since it's a page opened directly in a browser, not a shape the frontend consumes | 200 |
 
 ### 7.1 `POST /api/v1/scans`
 
@@ -494,6 +502,22 @@ A hostname that simply doesn't resolve is **not** an HTTP error. It is a `Scan` 
 
 `request_id` is generated per request, returned in the `X-Request-ID` header on every response, and included in every log line for that request.
 
+### 7.5 `POST /api/v1/waitlist` and `GET /api/v1/admin/stats` (Gate B)
+
+Request:
+```json
+{ "scan_id": "8f1c...", "email": "you@company.com" }
+```
+`email` is validated against a simple `local@domain.tld` shape — not full RFC 5322, deliberately, matching the scanner's own error-message register (state the problem, no over-engineering). `hostname` is never taken from the request body: it is looked up from `scan_id` server-side, so a signup can never be attributed to a hostname the visitor didn't actually scan.
+
+Response `200`:
+```json
+{ "hostname": "example.com", "message": "We'll email you 30 days before example.com expires." }
+```
+`scan_id` referring to no known scan → `404 SCAN_NOT_FOUND`, same as `GET /api/v1/scans/{scan_id}`.
+
+`GET /api/v1/admin/stats?token=<ADMIN_TOKEN>` returns a `text/plain` table: `daily_stats` for the last 30 days, then the last 100 scanned hostnames (`created_at`, `status`, `overall_grade`, `hostname`). Missing or mismatched `token` → `403`, plain text `Forbidden`, compared with `secrets.compare_digest`. Not part of the JSON API surface and not called by the frontend — it is a page a human opens directly.
+
 ---
 
 ## 8. Finding catalogue (Phase 1, closed)
@@ -510,7 +534,7 @@ New codes require a contract amendment. `sev` is the default; modules may escala
 | `CERT_EXPIRING_SOON` | certificate | high | 4–14 days left |
 | `CERT_EXPIRING_WARN` | certificate | medium | 15–30 days left |
 | `CERT_WEAK_KEY` | certificate | high | RSA < 2048 or ECDSA < 256 |
-| `CERT_WEAK_SIGNATURE` | certificate | high | SHA-1 or MD5 signature |
+| `CERT_WEAK_SIGNATURE` | certificate | high | SHA-1 or MD5 signature, on any certificate in the presented chain except the self-signed root (v1.4) — `evidence.position` names which one, same numbering as `chain.data.certificates` |
 | `CERT_LONG_LIFETIME` | certificate | medium | `lifetime_days` > 200 |
 | `CERT_NO_OCSP_STAPLING` | certificate | low | stapling absent |
 | `CHAIN_INCOMPLETE` | chain | high | intermediates missing |
@@ -520,11 +544,12 @@ New codes require a contract amendment. `sev` is the default; modules may escala
 | `TLS_LEGACY_PROTOCOL` | tls | high | TLS 1.0 or 1.1 enabled |
 | `TLS_NO_TLS13` | tls | low | TLS 1.3 unsupported |
 | `TLS_WEAK_CIPHER` | tls | high | RC4, 3DES, NULL, EXPORT, or CBC-only suites |
+| `TLS_WEAK_KEY_EXCHANGE` | tls | high | DHE parameters < 2048 bits, or ECDHE curve < 256 bits (v1.4). Only fires when `tls.data.key_exchange.bits` is actually known — see §6.4 |
 | `TLS_NO_FORWARD_SECRECY` | tls | medium | no ECDHE/DHE suite negotiated |
 | `DNS_NO_CAA` | dns | low | no CAA record |
 | `DNS_NO_DNSSEC` | dns | info | DNSSEC not enabled |
-| `DOMAIN_EXPIRING_CRITICAL` | dns | critical | domain registration ≤ 14 days |
-| `DOMAIN_EXPIRING_SOON` | dns | high | domain registration 15–45 days |
+| `DOMAIN_EXPIRING_CRITICAL` | dns | high (demoted from critical, v1.4) | domain registration ≤ 14 days, per the registry's own WHOIS record — excluded from the §9 grade-cap overrides |
+| `DOMAIN_EXPIRING_SOON` | dns | high | domain registration 15–45 days, per WHOIS — excluded from the §9 grade-cap overrides (v1.4) |
 | `DNS_SINGLE_NAMESERVER` | dns | medium | only one NS record |
 | `SPF_MISSING` | email_auth | medium | no SPF record |
 | `SPF_WEAK_POLICY` | email_auth | low | `+all` or `?all` |
@@ -597,6 +622,7 @@ If a module has `status == "error"` or `"skipped"`, drop it and re-normalise the
 - Any `critical` finding anywhere caps `overall_grade` at `F`.
 - Two or more `high` findings cap `overall_grade` at `C`.
 - Module grades use the same bands, computed from the module score, with the same critical cap.
+- **v1.4 (Gate A follow-up A4):** `DOMAIN_EXPIRING_CRITICAL` and `DOMAIN_EXPIRING_SOON` are excluded from both overrides above, at both the module and overall level — a stale or oddly-formatted WHOIS record (common on `.in`/`.co.in` and privacy-protected domains) must never be able to force a healthy TLS setup down to an `F` or a `C`. They still appear in the findings list at their own severity and still count toward their module's score in Step 1 — only the grade-cap overrides exclude them.
 
 **Step 5 — headline.** One sentence, chosen by this precedence: highest-severity finding's `title` if severity is critical or high; otherwise `"No serious problems found — {n} smaller improvements available."`; otherwise `"Clean result. Nothing to fix."`
 
@@ -617,6 +643,7 @@ The scanner accepts arbitrary user input and makes network requests. It is an SS
 7. **Rate limits.** `RATE_LIMIT_PER_IP_PER_HOUR` and `RATE_LIMIT_PER_HOSTNAME_PER_HOUR`, enforced in Redis with a sliding window. Return `429 RATE_LIMITED` with `retry_after_seconds`.
 8. **Blocklist.** A static denylist file for hosts we must never scan (localhost variants, cloud metadata endpoints such as `169.254.169.254`, our own infrastructure).
 9. **We never send credentials, never POST to the target, never follow forms, never execute JavaScript.** Read-only, unauthenticated, GET and TLS handshakes only.
+10. **User-Agent (v1.2).** The `headers` module's HTTP client identifies as a standard current desktop browser string, not the HTTP library default. Ground-truthed on swiggy.com: an unmodified `python-httpx/<version>` User-Agent gets an outright WAF block (403, no headers at all — CloudFront bot-management) on the exact same request that returns the real origin response, HSTS included, with a browser string. A blocked page is not evidence a header is missing; it is evidence the module never saw the real response. This is scoped to the `headers` module only — certificate/chain/TLS connections are raw TLS handshakes with no HTTP layer and no User-Agent to send.
 
 Accuracy is the product. A false "expiring in 3 days" on a healthy certificate destroys trust permanently. Where a check is uncertain, return `null` and a lower-confidence finding rather than guessing.
 
@@ -646,11 +673,34 @@ scans (
 
 index scans_hostname_created_idx on scans (hostname, created_at desc)
 index scans_status_idx on scans (status)
+
+waitlist_signups (            -- Gate B item 1
+  id             uuid primary key,
+  email          varchar(320) not null,
+  hostname       varchar(253) not null,   -- from the scan record, not the request
+  scan_id        uuid not null references scans(scan_id),
+  client_ip_hash varchar(64),             -- sha256(ip), never the raw IP
+  created_at     timestamptz not null default now()
+)
+
+index waitlist_signups_scan_id_idx on waitlist_signups (scan_id)
+index waitlist_signups_created_at_idx on waitlist_signups (created_at desc)
+
+daily_stats (                 -- Gate B item 2. One row per UTC day, upserted in place.
+  day               date primary key,
+  scans_started     integer not null default 0,
+  scans_completed   integer not null default 0,
+  scans_failed      integer not null default 0,
+  share_link_opens  integer not null default 0,  -- every GET /api/v1/scans/slug/{slug}, including the submitter's own first view
+  waitlist_signups  integer not null default 0
+)
 ```
 
 The full result lives in `result` as JSONB. Top-level columns are duplicated for querying and listing only. **Raw client IPs are never stored** — DPDP hygiene starts now, not later.
 
 `public_slug`: 12 characters from `[A-Za-z0-9]`, generated with `secrets.choice`, retried on collision.
+
+No personal data lives in `daily_stats` — it is five running integers per day, nothing else.
 
 ---
 
@@ -720,3 +770,7 @@ A phase is complete only when all of these are true:
 |---|---|---|
 | 1.0 | 2026-08-09 | Initial contract. Phase 1 scope. |
 | 1.1 | 2026-08-10 | §10 rule 3: port `80` additionally permitted, scoped to the `headers` module's HTTP→HTTPS redirect probe only. Raised as a build-time contradiction between §6.4 `headers.data` and the original port allowlist; resolved by the human. |
+| 1.2 | 2026-08-11 | Gate A follow-up A1. §6.4 `headers.data`: made explicit that hostname-crossing redirects are evaluated on the final hop, `final_url` names it. §10 rule 10 (new): `headers` module sends a browser User-Agent, not the HTTP library default — a WAF block is not a missing-header finding. Ground-truthed against `curl`/browser UA on google.com, flipkart.com, swiggy.com; see `docs/ACCURACY_REPORT.md` §A3b. |
+| 1.3 | 2026-08-11 | Gate B: funnel capture. New §4 var `ADMIN_TOKEN`. New §7.5 endpoints `POST /api/v1/waitlist` and `GET /api/v1/admin/stats` (the latter is `text/plain`, the one documented exception to §7's "all responses `application/json`"). New §11 tables `waitlist_signups` and `daily_stats`. No auth, plans, billing, or scheduled scanning added — out of Phase 1 scope per `docs/PHASE_1_GATE.md` Gate B. |
+| 1.5 | 2026-08-12 | Gate C: production deployment. New §4 vars `SENTRY_DSN` (api + worker) and `NEXT_PUBLIC_SENTRY_DSN` (web) — both empty by default, Sentry never initialised without one. No other contract-surface change (no new endpoints, fields, or finding codes); the rest of Gate C's deliverables (`docker-compose.prod.yml`, `Caddyfile`, `scripts/backup.sh`/`restore.sh`, `docs/DEPLOY.md`) are deployment infrastructure, not API contract. Two log-hygiene bugs found and fixed while verifying this live (both outside the JSON contract, noted here since they're exactly the DPDP posture CLAUDE.md rule 10 and this gate's item 8 require): uvicorn's default access log and Caddy's default JSON access log both print the raw client IP on every request regardless of what application code does — `apps/api/Dockerfile.prod` now runs with `--no-access-log`, and `deploy/caddy/Caddyfile`'s `log` block deletes `request>remote_ip`/`remote_port`/`X-Forwarded-For`. Confirmed live via `docker compose logs`. Separately, `LOG_LEVEL` (§4, present since v1.0) was a defined setting nothing ever applied — `app/logging_config.py` (new) wires it up for both the api and worker processes, and switches request logging to JSON so `request_id` (§7.4: "included in every log line for that request") actually appears, which a bare format string had been silently dropping. |
+| 1.4 | 2026-08-11 | Gate A follow-ups A2 and A4 (`docs/GATE_A_FOLLOWUPS.md`), closed before Gate C. **A2:** §8 `CERT_WEAK_SIGNATURE` now scoped to every certificate in the presented chain except the self-signed root, with `evidence.position` naming which one — was leaf-only. New §8 code `TLS_WEAK_KEY_EXCHANGE` (tls, high); new §6.4 `tls.data.key_exchange` field (`type`/`bits`/`curve`, each nullable — `bits`/`curve` are null in every live scan today since pyOpenSSL exposes no negotiated-group getter, confirmed by direct introspection, not assumed; the finding only fires when `bits` is actually known, never guessed per §10). **A4:** `DOMAIN_EXPIRING_CRITICAL` demoted from critical to high — a WHOIS-derived finding must not be able to force a healthy TLS setup to `F` on its own. §9 Step 4: `DOMAIN_EXPIRING_CRITICAL`/`DOMAIN_EXPIRING_SOON` excluded from both grade-cap overrides entirely (still scored normally in Step 1, still shown at their own severity). Finding copy for both now explicitly attributes the claim to "the registry record" rather than the scanner's own voice. Test-hygiene items A3 (network-dependent tests marked and excluded from the default `pytest` run) and A5 (classifier-level unit coverage for `TLS_WEAK_CIPHER`/`TLS_WEAK_KEY_EXCHANGE`) closed alongside this amendment but don't change the contract itself. |

@@ -38,6 +38,13 @@ class Settings(BaseSettings):
         default=6, alias="RATE_LIMIT_PER_HOSTNAME_PER_HOUR"
     )
     public_base_url: str = Field(default="http://localhost:3000", alias="PUBLIC_BASE_URL")
+    # Empty by default: no default token means /api/v1/admin/stats refuses
+    # every request until this is explicitly set, rather than shipping a
+    # guessable default that "works" out of the box.
+    admin_token: str = Field(default="", alias="ADMIN_TOKEN")
+    # Gate C. Empty by default: no DSN means Sentry is never initialised —
+    # error tracking is opt-in, never a silent default data destination.
+    sentry_dsn: str = Field(default="", alias="SENTRY_DSN")
 
     @field_validator("cors_origins")
     @classmethod

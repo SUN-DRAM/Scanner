@@ -32,7 +32,15 @@ from app.scanner import (
     readiness,
     tls,
 )
-from app.schemas import CertificateData, ModuleResult, Modules, ReadinessData, Scan, SeverityCounts
+from app.schemas import (
+    CertificateData,
+    ModuleResult,
+    Modules,
+    ReadinessData,
+    Scan,
+    SeverityCounts,
+)
+from app.stats import increment_daily_stat
 
 logger = logging.getLogger("app.scanner.orchestrator")
 
@@ -147,6 +155,7 @@ async def _mark_failed(
     record.completed_at = completed_at
     record.duration_ms = duration_ms
     record.result = scan.model_dump(mode="json")
+    await increment_daily_stat(session, "scans_failed", when=completed_at)
     await session.commit()
     return scan
 
@@ -250,6 +259,7 @@ async def _run_and_persist(
     record.result = scan.model_dump(mode="json")
     record.completed_at = completed_at
     record.duration_ms = duration_ms
+    await increment_daily_stat(session, "scans_completed", when=completed_at)
     await session.commit()
     return scan
 

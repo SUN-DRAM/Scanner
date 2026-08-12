@@ -8,6 +8,9 @@ import pytest
 
 from app.errors import ApiException, ErrorCode
 from app.safety import (
+    PER_MODULE_TIMEOUT_SECONDS,
+    RENEGOTIATION_PROBE_TIMEOUT_SECONDS,
+    SCANNER_USER_AGENT,
     HostnameResolutionError,
     is_blocked_ip,
     is_denylisted_hostname,
@@ -180,3 +183,26 @@ async def test_resolve_and_validate_rejects_denylisted_hostname() -> None:
 async def test_resolve_and_validate_raises_resolution_error_for_bogus_tld() -> None:
     with pytest.raises(HostnameResolutionError):
         await resolve_and_validate("this-domain-should-not-exist-sundram.invalid")
+
+
+# --- §10 rule 10: headers module User-Agent (Gate A follow-up A1) ---
+
+
+def test_renegotiation_probe_timeout_is_well_under_the_module_budget() -> None:
+    # Regression guard for the razorpay.com finding (Gate A follow-up A1): a
+    # server that silently ignores a renegotiation request never answers it
+    # at all, so pumping on it up to the *full* per-handshake budget wastes
+    # nearly the whole thing on a probe whose answer is already "no" and
+    # loses the race against run_module's own outer timeout. This probe must
+    # stay a small fraction of the module budget, not share it.
+    assert RENEGOTIATION_PROBE_TIMEOUT_SECONDS < PER_MODULE_TIMEOUT_SECONDS / 2
+
+
+def test_scanner_user_agent_is_not_the_httpx_default() -> None:
+    # Regression guard for the swiggy.com finding: an unmodified `python-httpx/*`
+    # User-Agent gets an outright WAF block (403, no security headers at all)
+    # on real production sites, which reads as a false MISSING on every header.
+    # `httpx`'s own default is generated from its version, so "does not start
+    # with python-httpx" is the stable, version-independent thing to assert.
+    assert not SCANNER_USER_AGENT.startswith("python-httpx")
+    assert "Mozilla" in SCANNER_USER_AGENT

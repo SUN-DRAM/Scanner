@@ -9,6 +9,7 @@ as a bare string or an HTML error page.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from enum import StrEnum
 from typing import Any
 
@@ -85,6 +86,57 @@ def _request_id(request: Request) -> str:
     return value if isinstance(value, str) else "req_unknown"
 
 
+_JSON_SAFE_SCALAR_TYPES = (str, int, float, bool, type(None))
+
+
+def _json_safe(value: Any) -> tuple[bool, Any]:
+    """Recursively determines whether `value` survives JSON encoding as-is,
+    returning `(is_safe, sanitized_value)`. Dicts and lists keep only their
+    JSON-safe members rather than being dropped wholesale for one bad leaf."""
+    if isinstance(value, _JSON_SAFE_SCALAR_TYPES):
+        return True, value
+    if isinstance(value, dict):
+        sanitized = {}
+        for key, item in value.items():
+            item_is_safe, sanitized_item = _json_safe(item)
+            if item_is_safe:
+                sanitized[key] = sanitized_item
+        return True, sanitized
+    if isinstance(value, (list, tuple)):
+        sanitized_list = []
+        for item in value:
+            item_is_safe, sanitized_item = _json_safe(item)
+            if item_is_safe:
+                sanitized_list.append(sanitized_item)
+        return True, sanitized_list
+    return False, None
+
+
+def _sanitize_validation_errors(errors: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`RequestValidationError.errors()` embeds the raw exception object under
+    `ctx.error` for any validator that raises a plain `ValueError` (the
+    documented Pydantic way to fail a `field_validator`) — pydantic_core
+    can't serialize that back out through `ApiError.details`, and the 422
+    this is supposed to produce becomes an unhandled 500 instead. `msg`
+    already carries the human-readable text ("Value error, ..."), so that
+    one key is safe to drop. But `ctx` isn't only exception objects — a
+    numeric constraint (`Field(ge=0)`) puts a plain int there (`{"ge": 0}`),
+    genuinely useful evidence a caller could use to build a better error
+    message, and stripping the whole key throws that away along with the
+    one bad leaf. Recursively keep whatever in `ctx` is actually JSON-safe
+    instead."""
+    sanitized: list[dict[str, Any]] = []
+    for error in errors:
+        clean = {key: value for key, value in error.items() if key != "ctx"}
+        raw_ctx = error.get("ctx")
+        if isinstance(raw_ctx, dict):
+            _, safe_ctx = _json_safe(raw_ctx)
+            if safe_ctx:
+                clean["ctx"] = safe_ctx
+        sanitized.append(clean)
+    return sanitized
+
+
 def _envelope(
     code: ErrorCode, message: str, details: dict[str, Any] | None, request_id: str
 ) -> dict[str, Any]:
@@ -112,7 +164,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             content=_envelope(
                 ErrorCode.VALIDATION_ERROR,
                 "The request body failed validation.",
-                {"errors": exc.errors()},
+                {"errors": _sanitize_validation_errors(exc.errors())},
                 _request_id(request),
             ),
         )

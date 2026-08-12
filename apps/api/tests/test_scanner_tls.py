@@ -39,3 +39,24 @@ async def test_forward_secrecy_detected_for_modern_negotiation(require_internet:
     assert result.data is not None
     assert result.data.forward_secrecy is True
     assert not any(f.code == "TLS_NO_FORWARD_SECRECY" for f in result.findings)
+
+
+@pytest.mark.asyncio
+async def test_razorpay_com_completes_without_timing_out_on_renegotiation(
+    require_internet: None,
+) -> None:
+    # Ground-truthed for Gate A follow-up A1: razorpay.com's CloudFront edge
+    # accepts the renegotiation request (`SSL_renegotiate` succeeds) but then
+    # never answers it — a normal, hardened-server posture, not a fluke of
+    # this one host. Before the fix, the renegotiation probe pumped on that
+    # silence for the *entire remaining* per-handshake budget (~8s), which
+    # then lost the race against run_module's own 8s outer timeout and wiped
+    # out an otherwise-successful TLS read. The whole module should now come
+    # back well inside that budget with real protocol data, not `status:
+    # "error"`.
+    result = await run(_ctx("razorpay.com"))
+    assert result.data is not None
+    assert result.error is None
+    assert result.duration_ms < 5000
+    assert result.data.protocols.tls1_2.supported is True
+    assert result.data.negotiated_protocol in ("TLSv1.2", "TLSv1.3")

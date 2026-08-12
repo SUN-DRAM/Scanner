@@ -7,10 +7,11 @@ edited together; see CLAUDE.md rule 4.
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Annotated, Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, PlainSerializer
+from pydantic import BaseModel, ConfigDict, PlainSerializer, field_validator
 
 from app.enums import (
     DmarcPolicy,
@@ -98,6 +99,18 @@ class TlsProtocols(ContractModel):
     tls1_3: ProtocolSupport
 
 
+class KeyExchangeData(ContractModel):
+    """Gate A follow-up A2 (contract §8 `TLS_WEAK_KEY_EXCHANGE`, amendment
+    v1.4). Every field nullable when not determinable — `type` comes from
+    the negotiated cipher suite name; `bits`/`curve` are not exposed by this
+    stack's TLS library (pyOpenSSL has no public getter for the negotiated
+    group), so they are always null in practice, never guessed."""
+
+    type: Literal["ECDHE", "DHE"] | None
+    bits: int | None
+    curve: str | None
+
+
 class TlsData(ContractModel):
     protocols: TlsProtocols
     negotiated_protocol: str
@@ -105,6 +118,7 @@ class TlsData(ContractModel):
     weak_ciphers: list[str]
     forward_secrecy: bool
     supports_renegotiation: bool
+    key_exchange: KeyExchangeData
 
 
 # --- 6.4 dns.data ---
@@ -319,6 +333,29 @@ class ScanCreateResponse(ContractModel):
     poll_url: str
     share_url: str
     cached: bool
+
+
+# --- 7.5 POST /api/v1/waitlist (Gate B item 1) ---
+
+_EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class WaitlistCreateRequest(ContractModel):
+    scan_id: str
+    email: str
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str) -> str:
+        value = value.strip()
+        if not _EMAIL_PATTERN.match(value):
+            raise ValueError("Not a valid email address.")
+        return value
+
+
+class WaitlistCreateResponse(ContractModel):
+    hostname: str
+    message: str
 
 
 # --- 6.5 MetaDeadlines — GET /api/v1/meta/deadlines ---

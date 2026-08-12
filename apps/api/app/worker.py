@@ -16,7 +16,13 @@ from arq.connections import RedisSettings
 
 from app.config import get_settings
 from app.db import get_sessionmaker
+from app.logging_config import configure_logging
+from app.observability import init_sentry
 from app.scanner.orchestrator import run_scan
+
+_settings = get_settings()
+configure_logging(_settings)
+init_sentry(_settings)
 
 
 async def run_scan_job(_ctx: dict[str, Any], scan_id: str) -> None:

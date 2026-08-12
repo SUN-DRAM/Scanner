@@ -7,7 +7,7 @@ import pytest
 from app.enums import ModuleName, Severity
 from app.findings import FINDINGS_BY_CODE, build_finding, docs_path_for
 
-# Exactly the 42 codes from contract §8, grouped by module as in the table.
+# Exactly the 43 codes from contract §8, grouped by module as in the table.
 EXPECTED_CODES: dict[str, tuple[ModuleName, Severity]] = {
     "CERT_EXPIRED": (ModuleName.CERTIFICATE, Severity.CRITICAL),
     "CERT_NOT_YET_VALID": (ModuleName.CERTIFICATE, Severity.CRITICAL),
@@ -27,10 +27,11 @@ EXPECTED_CODES: dict[str, tuple[ModuleName, Severity]] = {
     "TLS_LEGACY_PROTOCOL": (ModuleName.TLS, Severity.HIGH),
     "TLS_NO_TLS13": (ModuleName.TLS, Severity.LOW),
     "TLS_WEAK_CIPHER": (ModuleName.TLS, Severity.HIGH),
+    "TLS_WEAK_KEY_EXCHANGE": (ModuleName.TLS, Severity.HIGH),
     "TLS_NO_FORWARD_SECRECY": (ModuleName.TLS, Severity.MEDIUM),
     "DNS_NO_CAA": (ModuleName.DNS, Severity.LOW),
     "DNS_NO_DNSSEC": (ModuleName.DNS, Severity.INFO),
-    "DOMAIN_EXPIRING_CRITICAL": (ModuleName.DNS, Severity.CRITICAL),
+    "DOMAIN_EXPIRING_CRITICAL": (ModuleName.DNS, Severity.HIGH),
     "DOMAIN_EXPIRING_SOON": (ModuleName.DNS, Severity.HIGH),
     "DNS_SINGLE_NAMESERVER": (ModuleName.DNS, Severity.MEDIUM),
     "SPF_MISSING": (ModuleName.EMAIL_AUTH, Severity.MEDIUM),
@@ -54,9 +55,9 @@ EXPECTED_CODES: dict[str, tuple[ModuleName, Severity]] = {
 }
 
 
-def test_catalogue_has_exactly_the_42_contract_codes() -> None:
+def test_catalogue_has_exactly_the_43_contract_codes() -> None:
     assert set(FINDINGS_BY_CODE.keys()) == set(EXPECTED_CODES.keys())
-    assert len(FINDINGS_BY_CODE) == 42
+    assert len(FINDINGS_BY_CODE) == 43
 
 
 @pytest.mark.parametrize("code", list(EXPECTED_CODES.keys()))
@@ -113,3 +114,26 @@ def test_build_finding_raises_clear_error_for_missing_evidence() -> None:
 def test_build_finding_allows_severity_override() -> None:
     finding = build_finding("DNS_NO_DNSSEC", {"hostname": "example.com"}, severity=Severity.MEDIUM)
     assert finding.severity == Severity.MEDIUM
+
+
+def test_build_finding_cert_weak_signature_names_the_chain_position() -> None:
+    # Gate A follow-up A2: evidence.position names which certificate in the
+    # chain triggered it.
+    finding = build_finding(
+        "CERT_WEAK_SIGNATURE",
+        {"hostname": "example.com", "signature_algorithm": "sha1WithRSAEncryption", "position": 1},
+    )
+    assert finding.evidence["position"] == 1
+    assert "example.com" in finding.description
+    assert "sha1WithRSAEncryption" in finding.title
+
+
+def test_build_finding_tls_weak_key_exchange_renders() -> None:
+    finding = build_finding(
+        "TLS_WEAK_KEY_EXCHANGE",
+        {"hostname": "example.com", "key_exchange_type": "DHE", "key_exchange_bits": 1024},
+    )
+    assert finding.module == ModuleName.TLS
+    assert finding.severity == Severity.HIGH
+    assert "DHE" in finding.title
+    assert "1024" in finding.description

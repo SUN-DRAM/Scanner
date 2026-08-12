@@ -1,0 +1,222 @@
+name: sun-dram-scanner-prod
+
+# Gate C. Standalone production compose file — not layered on top of
+# docker-compose.yml (that one is dev-mode: bind-mounted source, `--reload`,
+# host-published Postgres/Redis ports). Differences from it, deliberately:
+#   - no bind mounts of application source (Dockerfile.prod images only;
+#     apps/api and apps/web are baked in, not mounted live)
+#   - Postgres/Redis are not published to the host at all
+#   - Caddy is the only container with published ports (80/443)
+#   - restart: unless-stopped everywhere, resource limits on the worker
+#   - a local Unbound resolver in front of public DNS (see deploy/unbound/)
+#
+# Bring up with: docker compose -f docker-compose.prod.yml up -d --build
+# Full runbook: docs/DEPLOY.md
+
+services:
+  unbound:
+    build:
+      context: ./deploy/unbound
+    restart: unless-stopped
+    networks:
+      scanner_net:
+        ipv4_address: 172.30.0.10
+    healthcheck:
+      test: ["CMD", "unbound-control", "-c", "/etc/unbound/unbound.conf", "status"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    dns: [172.30.0.10, 1.1.1.1, 8.8.8.8]
+    environment:
+      POSTGRES_USER: scanner
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: scanner
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - scanner_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scanner -d scanner"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    dns: [172.30.0.10, 1.1.1.1, 8.8.8.8]
+    volumes:
+      - redis_data:/data
+    networks:
+      - scanner_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile.prod
+    restart: unless-stopped
+    dns: [172.30.0.10, 1.1.1.1, 8.8.8.8]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://scanner:${POSTGRES_PASSWORD}@postgres:5432/scanner
+      REDIS_URL: redis://redis:6379/0
+    networks:
+      - scanner_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      unbound:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=3).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  worker:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile.prod
+    restart: unless-stopped
+    dns: [172.30.0.10, 1.1.1.1, 8.8.8.8]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://scanner:${POSTGRES_PASSWORD}@postgres:5432/scanner
+      REDIS_URL: redis://redis:6379/0
+    networks:
+      - scanner_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      unbound:
+        condition: service_healthy
+    command: arq app.worker.WorkerSettings
+    # Dockerfile.prod bakes in an HTTP healthcheck against uvicorn's port
+    # 8000, but this service runs arq, not uvicorn — nothing is ever
+    # listening there, so the inherited check would misreport "unhealthy"
+    # forever. arq has no built-in HTTP endpoint to check instead; process
+    # liveness (container exit code) is what `restart: unless-stopped`
+    # already covers.
+    healthcheck:
+      disable: true
+    # This is the one Gate C calls out by name: TLS handshakes and DNS
+    # lookups against arbitrary public hosts are the heaviest, least
+    # predictable resource users in this stack, and a single droplet has no
+    # neighbour to absorb a runaway job. Capped well under the box's full
+    # 4GB/2vCPU so Postgres/Redis/Caddy always have headroom.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile.prod
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://sundram.tech}
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-https://sundram.tech}
+        NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
+        SENTRY_AUTH_TOKEN: ${SENTRY_AUTH_TOKEN:-}
+        SENTRY_ORG: ${SENTRY_ORG:-}
+        SENTRY_PROJECT: ${SENTRY_PROJECT:-}
+    restart: unless-stopped
+    dns: [172.30.0.10, 1.1.1.1, 8.8.8.8]
+    env_file:
+      - .env
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://sundram.tech}
+      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-https://sundram.tech}
+    volumes:
+      # Read-only content, not application source — see contract §3.2's
+      # docs/findings/ layout. Editing a finding doc and redeploying (no
+      # rebuild needed) is the intended workflow; this is not a dev
+      # bind-mount of app or lib code.
+      - ./docs:/app/docs:ro
+    networks:
+      - scanner_net
+    depends_on:
+      - api
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    dns: [172.30.0.10, 1.1.1.1, 8.8.8.8]
+    env_file:
+      - .env
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - scanner_net
+    depends_on:
+      - api
+      - web
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+networks:
+  scanner_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:

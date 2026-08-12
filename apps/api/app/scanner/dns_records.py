@@ -28,6 +28,16 @@ LABEL = "DNS"
 
 _LOOKUP_TIMEOUT_SECONDS = 5.0
 
+# Every container in this stack gets Docker's embedded DNS proxy
+# (127.0.0.11) as its default /etc/resolv.conf nameserver. Confirmed live:
+# it silently answers NoAnswer for CAA and DNSKEY queries on names that
+# genuinely have both (cloudflare.com, checked directly against 8.8.8.8) —
+# a false "no CAA / no DNSSEC" on every single scan run in Docker, which is
+# the deployment target. Bypassing it for real public resolvers is an
+# accuracy fix, not a preference; contract §4 doesn't reserve an env var
+# for this, so it isn't configurable.
+_NAMESERVERS = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
+
 
 def _iso(value: datetime) -> str:
     return value.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -110,6 +120,7 @@ async def _lookup_whois(hostname: str) -> tuple[str | None, datetime | None, dat
 
 async def _detect(ctx: ScanContext) -> tuple[DnsData, list[Finding], str]:
     resolver = dns.asyncresolver.Resolver()
+    resolver.nameservers = _NAMESERVERS
     resolver.timeout = _LOOKUP_TIMEOUT_SECONDS
     resolver.lifetime = _LOOKUP_TIMEOUT_SECONDS
 

@@ -258,6 +258,12 @@ async def resolve_and_validate(hostname: str) -> ResolvedTarget:
 
 PER_MODULE_TIMEOUT_SECONDS = 8.0
 
+# tls.py's renegotiation probe (see _do_pinned_tls_handshake below): capped
+# separately from PER_MODULE_TIMEOUT_SECONDS because a server that silently
+# ignores a renegotiation request — the normal, hardened-server behavior,
+# not an edge case — never answers at all, and there is nothing to wait for.
+RENEGOTIATION_PROBE_TIMEOUT_SECONDS = 2.0
+
 
 async def open_pinned_connection(
     ip: str,
@@ -387,11 +393,24 @@ def _do_pinned_tls_handshake(
         # TLS 1.3 has no renegotiation as a protocol concept — that's an
         # accurate "no", not an untested guess. Below 1.3, attempt one and
         # see if the server accepts it; any failure just means "no".
+        #
+        # Ground-truthed on razorpay.com (Gate A follow-up A1 cross-check):
+        # a modern, hardened server doesn't reject a renegotiation request,
+        # it just never answers it. `conn.renegotiate()` returns `True` (the
+        # request was queued) and the follow-up `_pump` then blocks in
+        # `select()` for the rest of `deadline` waiting for a response that
+        # is never coming — burning up to the *entire* remaining handshake
+        # budget on a probe whose answer is already "no". That routinely
+        # loses the race against `run_module`'s own outer timeout, discarding
+        # an otherwise-successful protocol/cipher read. A real accept-or-
+        # reject is fast when it happens at all, so this probe gets its own
+        # short budget instead of the full one.
         supports_renegotiation = False
         if negotiated_protocol != "TLSv1.3":
+            reneg_deadline = min(deadline, time.monotonic() + RENEGOTIATION_PROBE_TIMEOUT_SECONDS)
             with contextlib.suppress(Exception):
                 if conn.renegotiate():
-                    _pump(sock, conn.do_handshake, deadline)
+                    _pump(sock, conn.do_handshake, reneg_deadline)
                     supports_renegotiation = True
 
         with contextlib.suppress(Exception):
@@ -474,6 +493,19 @@ class PinnedHostTransport(httpx.AsyncHTTPTransport):
 MAX_REDIRECTS = 5
 MAX_RESPONSE_BYTES = 512 * 1024
 
+# httpx's default `python-httpx/<version>` User-Agent gets an outright WAF block
+# (CloudFront/Akamai bot-management: 403, no security headers at all) on real
+# production sites — confirmed on swiggy.com, where the exact same request with
+# a browser User-Agent gets the real 202 response headers, HSTS included. A
+# blocked-page response isn't "no HSTS", it's "we never saw the real response",
+# which would otherwise ship as a false MISSING finding on every WAF-fronted
+# site the headers module fetches. A standard browser string is what gets the
+# real origin response back, so that's what accuracy (rule 7) requires here.
+SCANNER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
 
 @dataclass(frozen=True)
 class SafeFetchResult:
@@ -535,6 +567,7 @@ async def safe_get(
             transport=transport,
             timeout=timeout,
             follow_redirects=False,
+            headers={"user-agent": SCANNER_USER_AGENT},
         ) as client:
             response = await client.get(url)
             try:

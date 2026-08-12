@@ -5,7 +5,9 @@ in contract §6.4 `certificate.data`.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
+from typing import Any
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
@@ -95,6 +97,36 @@ def _hostname_matches(hostname: str, common_name: str, sans: list[str]) -> bool:
     return any(_label_matches_hostname(candidate, hostname) for candidate in candidates)
 
 
+def _chain_weak_signature_findings(
+    chain: tuple[x509.Certificate, ...], base_evidence: Mapping[str, Any]
+) -> list[Finding]:
+    """CERT_WEAK_SIGNATURE (Gate A follow-up A2): applies to every certificate
+    in the presented chain except the root. A SHA-1 intermediate is as fatal
+    as a SHA-1 leaf; the root is exempt because it's trusted by identity, so
+    its own self-signature carries no security meaning. One finding per
+    weak certificate, `evidence.position` naming which one (same numbering
+    as chain.data.certificates)."""
+    findings: list[Finding] = []
+    last_index = len(chain) - 1
+    for position, cert in enumerate(chain):
+        is_root = position == last_index and cert.subject == cert.issuer
+        if is_root:
+            continue
+        signature_hash = cert.signature_hash_algorithm
+        if signature_hash is not None and signature_hash.name in ("sha1", "md5"):
+            findings.append(
+                build_finding(
+                    "CERT_WEAK_SIGNATURE",
+                    {
+                        **base_evidence,
+                        "signature_algorithm": cert.signature_algorithm_oid._name,
+                        "position": position,
+                    },
+                )
+            )
+    return findings
+
+
 async def _detect(ctx: ScanContext) -> tuple[CertificateData, list[Finding], str]:
     target = await resolve_and_validate(ctx.hostname)
     handshake = await open_pinned_tls_handshake(target.ip, ctx.port, ctx.hostname)
@@ -107,7 +139,6 @@ async def _detect(ctx: ScanContext) -> tuple[CertificateData, list[Finding], str
     not_before = leaf.not_valid_before_utc
     not_after = leaf.not_valid_after_utc
     key_algorithm, key_size_bits = _key_algorithm_and_size(leaf)
-    signature_hash = leaf.signature_hash_algorithm
     is_self_signed = leaf.subject == leaf.issuer
     is_wildcard = any(san.startswith("*.") for san in sans) or common_name.startswith("*.")
     hostname_matches = _hostname_matches(ctx.hostname, common_name, sans)
@@ -182,13 +213,7 @@ async def _detect(ctx: ScanContext) -> tuple[CertificateData, list[Finding], str
             )
         )
 
-    if signature_hash is not None and signature_hash.name in ("sha1", "md5"):
-        findings.append(
-            build_finding(
-                "CERT_WEAK_SIGNATURE",
-                {**base_evidence, "signature_algorithm": data.signature_algorithm},
-            )
-        )
+    findings.extend(_chain_weak_signature_findings(handshake.chain, base_evidence))
 
     if data.lifetime_days > 200:
         findings.append(

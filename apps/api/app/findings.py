@@ -161,12 +161,17 @@ _DEFINITIONS: tuple[FindingDefinition, ...] = (
         severity=Severity.HIGH,
         title_template="Certificate uses a weak {signature_algorithm} signature",
         description_template=(
-            "The certificate for {hostname} is signed with {signature_algorithm}, an "
-            "algorithm no longer considered safe against forgery."
+            "Certificate #{position} in {hostname}'s chain is signed with "
+            "{signature_algorithm}, an algorithm no longer considered safe against forgery. "
+            "This applies to any certificate in the chain except the self-signed root, whose "
+            "own signature carries no security meaning — a weak intermediate is as fatal as a "
+            "weak leaf."
         ),
         remediation_template=(
             "Reissue the certificate with a SHA-256 or stronger signature algorithm — most "
-            "modern certificate authorities do this by default."
+            "modern certificate authorities do this by default. If the affected certificate is "
+            "an intermediate, this is the certificate authority's problem to fix, not the "
+            "server operator's — contact them for an updated chain."
         ),
     ),
     FindingDefinition(
@@ -305,6 +310,24 @@ _DEFINITIONS: tuple[FindingDefinition, ...] = (
         ),
     ),
     FindingDefinition(
+        code="TLS_WEAK_KEY_EXCHANGE",
+        module=ModuleName.TLS,
+        severity=Severity.HIGH,
+        title_template="Key exchange uses weak {key_exchange_type} parameters",
+        description_template=(
+            "{hostname} negotiated {key_exchange_type} key exchange with only "
+            "{key_exchange_bits} bits, below the minimum modern clients expect (DHE 2048 "
+            "bits, ECDHE 256-bit curve). A weak key exchange narrows the effort needed to "
+            "break forward secrecy for this session."
+        ),
+        remediation_template=(
+            "Configure the server to offer only DHE groups of 2048 bits or larger, or ECDHE "
+            "curves of 256 bits or larger (X25519 or P-256) — most modern web servers default "
+            "to safe groups already, so this usually means removing an explicit legacy "
+            "override."
+        ),
+    ),
+    FindingDefinition(
         code="TLS_NO_FORWARD_SECRECY",
         module=ModuleName.TLS,
         severity=Severity.MEDIUM,
@@ -350,16 +373,27 @@ _DEFINITIONS: tuple[FindingDefinition, ...] = (
     FindingDefinition(
         code="DOMAIN_EXPIRING_CRITICAL",
         module=ModuleName.DNS,
-        severity=Severity.CRITICAL,
+        # Gate A follow-up A4: demoted from critical to high. Registration
+        # expiry is real and urgent, but it's not a TLS failure — a stale or
+        # oddly-formatted WHOIS record (common on .in/.co.in and
+        # privacy-protected domains, most of this product's market) must
+        # never be able to cap a healthy site's grade at F on its own. Also
+        # excluded from the §9 grade-cap overrides entirely — see
+        # grading.py's GRADE_CAP_EXCLUDED_CODES.
+        severity=Severity.HIGH,
         title_template="Domain registration expires in {days_until_domain_expiry} days",
         description_template=(
-            "The registration for {hostname} expires on {domain_expires_at_display}. If it "
-            "lapses, the domain — and every certificate and email address tied to it — "
-            "stops working entirely."
+            "The registry record for {hostname} says it expires on "
+            "{domain_expires_at_display}. If that's accurate and it lapses, the domain — and "
+            "every certificate and email address tied to it — stops working entirely. Confirm "
+            "with your registrar before treating this as certain: registry records are "
+            "sometimes stale or inconsistently formatted, especially for privacy-protected "
+            "domains."
         ),
         remediation_template=(
-            "Renew the domain registration today, and turn on auto-renewal with the "
-            "registrar so this cannot happen silently again."
+            "Confirm the actual expiry with your registrar. If it's accurate, renew the "
+            "domain registration today and turn on auto-renewal so this cannot happen "
+            "silently again."
         ),
     ),
     FindingDefinition(
@@ -368,12 +402,13 @@ _DEFINITIONS: tuple[FindingDefinition, ...] = (
         severity=Severity.HIGH,
         title_template="Domain registration expires in {days_until_domain_expiry} days",
         description_template=(
-            "The registration for {hostname} expires on {domain_expires_at_display} with "
-            "registrar {registrar}."
+            "The registry record for {hostname} says it expires on "
+            "{domain_expires_at_display} with registrar {registrar}. Registry records are "
+            "sometimes stale — confirm the actual date with the registrar directly."
         ),
         remediation_template=(
-            "Renew the domain registration and turn on auto-renewal so this does not need "
-            "tracking manually."
+            "Confirm the actual expiry with your registrar, then renew the domain "
+            "registration and turn on auto-renewal so this does not need tracking manually."
         ),
     ),
     FindingDefinition(

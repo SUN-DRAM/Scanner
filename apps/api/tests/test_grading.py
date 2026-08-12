@@ -257,3 +257,41 @@ def test_worst_finding_picks_highest_severity_regardless_of_insertion_order() ->
 
 def test_worst_finding_returns_none_for_empty_list() -> None:
     assert worst_finding([]) is None
+
+
+# --- Gate A follow-up A4: domain-expiry findings excluded from grade caps ---
+
+
+def test_domain_expiring_critical_does_not_force_overall_f_even_if_critical() -> None:
+    # Defensive: even a hypothetically-critical domain-expiry finding must
+    # never cap the grade, not just today's demoted-to-high severity.
+    finding = _finding(Severity.CRITICAL, ModuleName.DNS, "DOMAIN_EXPIRING_CRITICAL")
+    score = score_module([finding])  # 100 - 45 = 55
+    grade = compute_overall_grade(score, [finding])
+    assert grade == grade_for_score(score)  # banded normally, no F override
+
+
+def test_domain_expiry_highs_alone_do_not_trigger_the_two_high_cap() -> None:
+    findings = [
+        _finding(Severity.HIGH, ModuleName.DNS, "DOMAIN_EXPIRING_CRITICAL"),
+        _finding(Severity.HIGH, ModuleName.DNS, "DOMAIN_EXPIRING_SOON"),
+    ]
+    score = score_module(findings)
+    grade = compute_overall_grade(score, findings)
+    assert grade == grade_for_score(score)  # no cap-to-C from two excluded highs
+
+
+def test_one_real_high_plus_domain_expiry_high_does_not_trigger_the_two_high_cap() -> None:
+    findings = [
+        _finding(Severity.HIGH, ModuleName.TLS, "TLS_LEGACY_PROTOCOL"),
+        _finding(Severity.HIGH, ModuleName.DNS, "DOMAIN_EXPIRING_CRITICAL"),
+    ]
+    score = score_module(findings)
+    grade = compute_overall_grade(score, findings)
+    assert grade == grade_for_score(score)  # only one cap-relevant high — cap needs 2+
+
+
+def test_domain_expiring_critical_does_not_force_its_own_module_to_f() -> None:
+    finding = _finding(Severity.CRITICAL, ModuleName.DNS, "DOMAIN_EXPIRING_CRITICAL")
+    score = score_module([finding])  # 100 - 45 = 55 -> bands to D
+    assert grade_module(score, [finding]) == Grade.D

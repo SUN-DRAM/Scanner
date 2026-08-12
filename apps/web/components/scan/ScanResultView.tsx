@@ -9,6 +9,7 @@ import { GradeDial } from "@/components/scan/GradeDial";
 import { ModuleCard } from "@/components/scan/ModuleCard";
 import { ScanProgress } from "@/components/scan/ScanProgress";
 import { ValidityBar } from "@/components/scan/ValidityBar";
+import { WaitlistForm } from "@/components/scan/WaitlistForm";
 import { pollScan, ScanPollTimeoutError } from "@/lib/api";
 import { formatDateTimeDisplay } from "@/lib/format";
 import type { ModuleName, Scan } from "@/types/contract";
@@ -91,6 +92,7 @@ export function ScanResultView({ initialScan }: ScanResultViewProps) {
         <p className="font-mono text-xs text-ink-muted">
           Scanned {formatDateTimeDisplay(scannedAt)}
         </p>
+        <WaitlistForm scanId={scan.scan_id} hostname={scan.hostname} />
       </section>
 
       {certificate?.data ? (

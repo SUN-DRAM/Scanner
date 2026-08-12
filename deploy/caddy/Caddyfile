@@ -1,0 +1,65 @@
+# Gate C. Automatic HTTPS for sundram.tech via Let's Encrypt — this is a
+# certificate-readiness product; its own certificate is the first thing a
+# prospect checks, and it must be unimpeachable (contract §Gate C's
+# "credibility check": HSTS long max-age, complete chain, TLS 1.3, CSP, a
+# CAA record naming this CA). {$CADDY_EMAIL} is read from the host's
+# environment (see .env.production.example) — ACME needs a real contact
+# address for expiry/revocation notices.
+{
+	email {$CADDY_EMAIL}
+	acme_ca https://acme-v02.api.letsencrypt.org/directory
+}
+
+www.sundram.tech {
+	redir https://sundram.tech{uri} permanent
+}
+
+sundram.tech {
+	encode zstd gzip
+
+	header {
+		# 1 year, includeSubDomains, preload — the long max-age Gate C's
+		# credibility check names explicitly. Preload only makes sense once
+		# this is genuinely stable; submitting to the HSTS preload list is a
+		# separate, deliberate step documented in docs/DEPLOY.md, not
+		# automatic just because this header is present.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		# script-src 'unsafe-inline' is here for Next.js's own hydration
+		# bootstrap script, which it inlines with a nonce-less hash Caddy
+		# can't easily predict; tightening this to a per-request nonce needs
+		# app-level middleware, not just a proxy-layer header — noted as a
+		# follow-up in docs/DEPLOY.md rather than shipped half-done here.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'"
+		-Server
+	}
+
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+
+	# Caddy's default JSON access log includes the raw client IP
+	# (request>remote_ip) and X-Forwarded-For on every line — the same
+	# DPDP gap as uvicorn's own access log (see apps/api/Dockerfile.prod),
+	# just at the edge instead of the app layer. Deleted here rather than
+	# left in, for the same reason: CLAUDE.md rule 10 says raw client IPs
+	# are never stored, and a log line is storage.
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>remote_ip delete
+				request>remote_port delete
+				request>headers>X-Forwarded-For delete
+			}
+		}
+	}
+}

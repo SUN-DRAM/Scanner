@@ -121,17 +121,27 @@ async def test_post_scans_rejects_disallowed_port(client: AsyncClient) -> None:
 async def test_post_scans_rejects_private_address_target(
     client: AsyncClient, redis_client: Redis
 ) -> None:
+    # "localhost" itself is the wrong fixture here: contract §7.2 step 6
+    # requires "at least one dot", so normalize_hostname rejects a bare
+    # "localhost" with INVALID_HOSTNAME before the denylist is ever
+    # consulted — confirmed live against Docker's Postgres+Redis, where
+    # this test previously only ever ran skipped. "localhost.localdomain"
+    # is also in STATIC_HOST_DENYLIST (safety.py) but has a dot, so it
+    # actually reaches and exercises the BLOCKED_TARGET path this test
+    # means to cover.
+    #
     # Rate limiting (§10 rule 7) runs before the block check deliberately —
     # otherwise probing the SSRF guard would itself be a free, unthrottled
-    # request. "localhost" is a fixed denylist string (STATIC_HOST_DENYLIST
-    # in safety.py), reused across every run of this test against a real,
-    # persistent Redis, so its hostname bucket is reset first to keep this
-    # test from eventually tripping RATE_LIMITED instead of BLOCKED_TARGET.
+    # request. This hostname is a fixed denylist string reused across every
+    # run of this test against a real, persistent Redis, so its hostname
+    # bucket is reset first to keep this test from eventually tripping
+    # RATE_LIMITED instead of BLOCKED_TARGET.
     from app.ratelimit import hash_for_bucket
 
-    await redis_client.delete(f"ratelimit:hostname:{hash_for_bucket('localhost')}")
+    hostname = "localhost.localdomain"
+    await redis_client.delete(f"ratelimit:hostname:{hash_for_bucket(hostname)}")
 
-    response = await client.post("/api/v1/scans", json={"hostname": "localhost"})
+    response = await client.post("/api/v1/scans", json={"hostname": hostname})
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "BLOCKED_TARGET"
 

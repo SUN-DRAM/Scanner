@@ -131,19 +131,33 @@ def _cap_grade(grade: Grade, cap: Grade) -> Grade:
 
 # --- Step 4: overrides ---
 
+# Gate A follow-up A4: domain-registration-expiry findings are real and
+# urgent, but they're not a TLS failure, and a stale or oddly-formatted WHOIS
+# record (common on .in/.co.in and privacy-protected domains — most of this
+# product's market) must never be able to force a healthy TLS setup down to
+# an F or a C on its own. They still appear in the findings list at their
+# own severity and still count toward their module's score (Step 1) — only
+# the grade-cap overrides below exclude them.
+GRADE_CAP_EXCLUDED_CODES = frozenset({"DOMAIN_EXPIRING_CRITICAL", "DOMAIN_EXPIRING_SOON"})
+
+
+def _grade_cap_relevant(findings: Sequence[Finding]) -> list[Finding]:
+    return [finding for finding in findings if finding.code not in GRADE_CAP_EXCLUDED_CODES]
+
 
 def grade_module(score: int, findings: Sequence[Finding]) -> Grade:
     grade = grade_for_score(score)
-    if has_critical(findings):
+    if has_critical(_grade_cap_relevant(findings)):
         grade = Grade.F
     return grade
 
 
 def compute_overall_grade(score: int, all_findings: Sequence[Finding]) -> Grade:
+    cap_relevant = _grade_cap_relevant(all_findings)
     grade = grade_for_score(score)
-    if has_critical(all_findings):
+    if has_critical(cap_relevant):
         grade = Grade.F
-    high_count = sum(1 for finding in all_findings if finding.severity == Severity.HIGH)
+    high_count = sum(1 for finding in cap_relevant if finding.severity == Severity.HIGH)
     if high_count >= 2:
         grade = _cap_grade(grade, Grade.C)
     return grade

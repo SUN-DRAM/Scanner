@@ -1,0 +1,61 @@
+# Gate C: a leaner counterpart to Dockerfile, which is deliberately dev-mode
+# (installs `.[dev]` — pytest/ruff/mypy — because docker-compose.yml's api/
+# worker services are dev-mode too, `--reload` and bind-mounted, and CLAUDE.md
+# documents `docker compose exec api pytest`/`ruff`/`mypy` against that exact
+# image). Production has no reason to ship test tooling in the runtime image,
+# and docker-compose.prod.yml builds this file instead.
+
+# --- builder ---
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml ./
+COPY app ./app
+
+RUN pip install --no-cache-dir --prefix=/install .
+
+# --- runtime ---
+FROM python:3.12-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libpq5 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 scanner \
+    && useradd --uid 1000 --gid scanner --shell /bin/bash --create-home scanner
+
+COPY --from=builder /install /usr/local
+
+WORKDIR /app
+
+# Only what's needed to run the app and its migrations — no tests/, no
+# ruff.toml/mypy.ini, no dev pyproject extras.
+COPY --chown=scanner:scanner app ./app
+COPY --chown=scanner:scanner alembic.ini ./
+COPY --chown=scanner:scanner migrations ./migrations
+COPY --chown=scanner:scanner pyproject.toml ./
+
+USER scanner
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=5 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=3).status == 200 else 1)"
+
+# --no-access-log: uvicorn's default access log prints the raw client
+# address on every request ("172.30.0.6:58610 - GET ... 200 OK"), reaching
+# `docker compose logs` regardless of what application code does — CLAUDE.md
+# rule 10 says raw client IPs are never stored, and this is exactly that,
+# just via a side channel app/main.py's own request-id middleware doesn't
+# control. That middleware already logs method/path/status/duration per
+# request (IP-free, request_id-correlated), making uvicorn's own access log
+# redundant as well as the actual DPDP gap — confirmed live: `docker compose
+# logs api` showed raw IP:port pairs until this flag was added.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

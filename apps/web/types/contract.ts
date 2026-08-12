@@ -104,6 +104,17 @@ export interface TlsProtocols {
   tls1_3: ProtocolSupport;
 }
 
+/**
+ * Gate A follow-up A2 (contract §8 TLS_WEAK_KEY_EXCHANGE, amendment v1.4).
+ * `bits`/`curve` are always null in practice — this stack's TLS library has
+ * no way to read the negotiated group, so it is never guessed at.
+ */
+export interface KeyExchangeData {
+  type: "ECDHE" | "DHE" | null;
+  bits: number | null;
+  curve: string | null;
+}
+
 export interface TlsData {
   protocols: TlsProtocols;
   negotiated_protocol: string;
@@ -111,6 +122,7 @@ export interface TlsData {
   weak_ciphers: string[];
   forward_secrecy: boolean;
   supports_renegotiation: boolean;
+  key_exchange: KeyExchangeData;
 }
 
 export interface MxRecord {
@@ -297,6 +309,18 @@ export interface ScanCreateResponse {
   poll_url: string;
   share_url: string;
   cached: boolean;
+}
+
+// --- 7.5 POST /api/v1/waitlist ---
+
+export interface WaitlistCreateRequest {
+  scan_id: string;
+  email: string;
+}
+
+export interface WaitlistCreateResponse {
+  hostname: string;
+  message: string;
 }
 
 // --- 6.5 MetaDeadlines — GET /api/v1/meta/deadlines ---

@@ -37,6 +37,7 @@ from app.safety import (
 )
 from app.scanner.orchestrator import EMPTY_MODULES, share_url
 from app.schemas import Scan, ScanCreateRequest, ScanCreateResponse
+from app.stats import increment_daily_stat
 
 router = APIRouter(tags=["scans"])
 
@@ -201,6 +202,8 @@ async def create_scan(
     record = await _create_scan_record(
         session, normalized.hostname, normalized.port, _client_ip(request)
     )
+    await increment_daily_stat(session, "scans_started")
+    await session.commit()
     await arq_pool.enqueue_job("run_scan_job", str(record.scan_id))
 
     response.status_code = status.HTTP_202_ACCEPTED
@@ -241,4 +244,12 @@ async def get_scan_by_slug(public_slug: str, session: AsyncSession = Depends(get
             f"No scan found for '{public_slug}'.",
             {"public_slug": public_slug},
         )
+    # The share link (contract §6.1 `share_url`) is the only thing that
+    # reaches this endpoint by slug — including the submitter's own first
+    # view right after creating the scan, since the frontend redirects here.
+    # That's the honest count of "this share URL was opened," not a proxy
+    # for a distinct third party; no session/cookie tracking exists to tell
+    # the two apart, and adding one would be scope creep for a Gate B counter.
+    await increment_daily_stat(session, "share_link_opens")
+    await session.commit()
     return _scan_from_record(record)

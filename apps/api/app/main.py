@@ -17,8 +17,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.errors import REQUEST_ID_HEADER, register_exception_handlers
+from app.logging_config import configure_logging
+from app.observability import init_sentry
 from app.redis_client import close_arq_pool
-from app.routers import health, meta, scans
+from app.routers import admin, health, meta, scans, waitlist
 
 logger = logging.getLogger("app")
 
@@ -31,6 +33,8 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    configure_logging(settings)
+    init_sentry(settings)
 
     app = FastAPI(
         title="SUN-DRAM Scanner API",
@@ -76,6 +80,8 @@ def create_app() -> FastAPI:
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(scans.router, prefix="/api/v1")
     app.include_router(meta.router, prefix="/api/v1")
+    app.include_router(waitlist.router, prefix="/api/v1")
+    app.include_router(admin.router, prefix="/api/v1")
 
     return app
 

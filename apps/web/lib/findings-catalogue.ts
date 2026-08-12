@@ -1,5 +1,5 @@
 /**
- * The 42 finding codes from contract §8 — code, module and default
+ * The 43 finding codes from contract §8 — code, module and default
  * severity only, exactly as that table lists them. This mirrors the
  * *shape* of `apps/api/app/findings.py`'s catalogue so `generateStaticParams`
  * can pre-render every `/docs/findings/[code]` route; it is not a second
@@ -35,10 +35,11 @@ export const FINDINGS_CATALOGUE: readonly FindingCatalogueEntry[] = [
   { code: "TLS_LEGACY_PROTOCOL", module: "tls", severity: "high" },
   { code: "TLS_NO_TLS13", module: "tls", severity: "low" },
   { code: "TLS_WEAK_CIPHER", module: "tls", severity: "high" },
+  { code: "TLS_WEAK_KEY_EXCHANGE", module: "tls", severity: "high" },
   { code: "TLS_NO_FORWARD_SECRECY", module: "tls", severity: "medium" },
   { code: "DNS_NO_CAA", module: "dns", severity: "low" },
   { code: "DNS_NO_DNSSEC", module: "dns", severity: "info" },
-  { code: "DOMAIN_EXPIRING_CRITICAL", module: "dns", severity: "critical" },
+  { code: "DOMAIN_EXPIRING_CRITICAL", module: "dns", severity: "high" },
   { code: "DOMAIN_EXPIRING_SOON", module: "dns", severity: "high" },
   { code: "DNS_SINGLE_NAMESERVER", module: "dns", severity: "medium" },
   { code: "SPF_MISSING", module: "email_auth", severity: "medium" },

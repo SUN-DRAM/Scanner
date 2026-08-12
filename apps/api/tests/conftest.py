@@ -15,6 +15,21 @@ from app.config import get_settings
 from app.models import Base
 
 
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Gate A follow-up A3: every test that depends on `require_internet`
+    makes a real connection to an external host, and this stack's flakiest
+    failures (1-8 per run, never the same set twice) all came from hammering
+    a single free, unSLA'd demo server (badssl.com) with that traffic — see
+    docs/ACCURACY_REPORT.md. Auto-marking off the fixture, rather than
+    hand-decorating ~34 call sites across 8 files, means a test can't opt
+    into live network without also opting into the `network` marker (see
+    pyproject.toml's `addopts = "-m 'not network'"`) — there's no path that
+    forgets one but not the other."""
+    for item in items:
+        if "require_internet" in getattr(item, "fixturenames", ()):
+            item.add_marker(pytest.mark.network)
+
+
 def _has_internet() -> bool:
     try:
         socket.setdefaulttimeout(3)
@@ -59,7 +74,13 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
     settings = get_settings()
     engine = create_async_engine(settings.database_url, pool_pre_ping=True)
     try:
-        async with engine.connect() as conn:
+        # `engine.begin()`, not `engine.connect()`: SQLAlchemy 2.0 connections
+        # auto-begin a transaction and roll it back on close unless committed,
+        # so `create_all` on a plain `connect()` silently never persists —
+        # confirmed live, every DB-backed router test failed with
+        # `UndefinedTable: relation "scans" does not exist` despite this
+        # fixture running immediately before each one.
+        async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
     except Exception:
         await engine.dispose()
