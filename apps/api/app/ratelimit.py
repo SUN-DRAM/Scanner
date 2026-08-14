@@ -78,3 +78,17 @@ async def enforce_otp_request_rate_limits(
     ip_key = f"ratelimit:otp:ip:{hash_for_bucket(client_ip)}"
     await _check_and_record(redis, email_key, per_email_per_hour, window_seconds)
     await _check_and_record(redis, ip_key, per_ip_per_hour, window_seconds)
+
+
+async def enforce_monitor_scan_rate_limit(
+    redis: Redis,
+    *,
+    monitor_id: str,
+    limit_per_window: int = 1,
+    window_seconds: int = 600,
+) -> None:
+    """Contract §7.8: one manual re-scan per monitor per 10 minutes. Same
+    sliding-window mechanism as the other two limiters, its own key prefix
+    and a 10-minute window rather than `WINDOW_SECONDS`'s hour."""
+    key = f"ratelimit:monitor_scan:{hash_for_bucket(monitor_id)}"
+    await _check_and_record(redis, key, limit_per_window, window_seconds)

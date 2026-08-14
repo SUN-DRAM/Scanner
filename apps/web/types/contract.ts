@@ -451,3 +451,76 @@ export interface MemberInviteRequest {
 
 // POST /api/v1/orgs/current/members -> MembershipWithEmail (201)
 // DELETE /api/v1/orgs/current/members/{user_id} -> 204 No Content
+
+// --- 6.9 / 7.8 Monitored hostnames (Phase 2 Step 3) ---
+
+export interface MonitoredHostname {
+  monitor_id: string;
+  org_id: string;
+  hostname: string;
+  port: number;
+  state: MonitorState;
+  label: string | null;
+  notes: string | null;
+  last_scan_id: string | null;
+  last_grade: Grade | null;
+  last_score: number | null;
+  last_scanned_at: string | null;
+  next_scan_at: string | null;
+  days_until_expiry: number | null;
+  created_at: string;
+}
+
+export interface MonitorCreateRequest {
+  hostname: string;
+  port: number | null;
+  label: string | null;
+  notes: string | null;
+}
+
+// PATCH body — every field optional; omit a key to leave it unchanged, send
+// it as null to clear it. `state` only accepts "active"/"paused" — the
+// other two MonitorState values are system-managed (see CONTRACT.md §7.8).
+export interface MonitorUpdateRequest {
+  label?: string | null;
+  notes?: string | null;
+  state?: "active" | "paused" | null;
+}
+
+export interface MonitorBulkRequest {
+  hostnames: string[]; // 1-100 items
+}
+
+export interface MonitorBulkRow {
+  hostname: string;
+  accepted: boolean;
+  monitor: MonitoredHostname | null;
+  reason_code: ErrorCode | null;
+  reason: string | null;
+}
+
+export interface MonitorBulkResponse {
+  results: MonitorBulkRow[];
+  accepted_count: number;
+  rejected_count: number;
+}
+
+// Documented for reference, not a distinct schema — QUOTA_EXCEEDED's
+// ApiError.details shape (§7.4/§7.8), same free-form `details: object`
+// every other error code already uses.
+export interface QuotaExceededDetails {
+  current: number;
+  limit: number;
+  plan_code: PlanCode;
+  upgrade_to: PlanCode | null;
+}
+
+// GET /api/v1/monitors?state=&page=&per_page= -> PaginatedList<MonitoredHostname>
+//   Always ordered by days_until_expiry ascending, nulls last — the one
+//   sortable field the phase prompt names, no `sort`/`order` query param.
+// POST /api/v1/monitors -> MonitoredHostname (201) | 402 QUOTA_EXCEEDED | 409 DUPLICATE_HOSTNAME
+// GET /api/v1/monitors/{monitor_id} -> MonitoredHostname | 404 NOT_FOUND
+// PATCH /api/v1/monitors/{monitor_id} -> MonitoredHostname | 404 NOT_FOUND
+// DELETE /api/v1/monitors/{monitor_id} -> 204 No Content | 404 NOT_FOUND
+// POST /api/v1/monitors/bulk -> MonitorBulkResponse (200)
+// POST /api/v1/monitors/{monitor_id}/scan -> ScanCreateResponse (202) | 404 NOT_FOUND | 429 RATE_LIMITED

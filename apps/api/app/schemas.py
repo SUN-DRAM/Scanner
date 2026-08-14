@@ -20,6 +20,7 @@ from app.enums import (
     LifetimePhase,
     ModuleName,
     ModuleStatus,
+    MonitorState,
     PlanCode,
     ReadinessVerdict,
     ScanStatus,
@@ -27,7 +28,7 @@ from app.enums import (
     SpfPolicy,
     UserRole,
 )
-from app.errors import ApiError
+from app.errors import ApiError, ErrorCode
 
 # --- shared scalar types (contract §2.3: ISO 8601 UTC with Z, plain ISO dates) ---
 
@@ -500,3 +501,72 @@ class MemberInviteRequest(ContractModel):
         if not _EMAIL_PATTERN.match(value):
             raise ValueError("Not a valid email address.")
         return value
+
+
+# --- 6.9 / 7.8 Monitored hostnames (Phase 2 Step 3) ---
+
+
+class MonitoredHostname(ContractModel):
+    monitor_id: str
+    org_id: str
+    hostname: str
+    port: int
+    state: MonitorState
+    label: str | None
+    notes: str | None
+    last_scan_id: str | None
+    last_grade: Grade | None
+    last_score: int | None
+    last_scanned_at: UtcDatetime | None
+    next_scan_at: UtcDatetime | None
+    days_until_expiry: int | None
+    created_at: UtcDatetime
+
+
+class MonitorCreateRequest(ContractModel):
+    hostname: str
+    # None means "not supplied" — same convention as ScanCreateRequest.port
+    # (§7.1): app.safety.normalize_hostname applies the 443 default.
+    port: int | None = None
+    label: str | None = None
+    notes: str | None = None
+
+
+class MonitorUpdateRequest(ContractModel):
+    """PATCH body — every field optional. Only the keys actually present in
+    the request are applied (routers/monitors.py checks
+    `model_fields_set`), so omitting a field leaves it unchanged while
+    sending it as `null` clears it. `state` is deliberately narrower than
+    the full `MonitorState` enum: `quota_blocked` and `verification_pending`
+    are system-managed transitions, not something a PATCH request can set."""
+
+    label: str | None = None
+    notes: str | None = None
+    state: Literal["active", "paused"] | None = None
+
+
+class MonitorBulkRequest(ContractModel):
+    hostnames: list[str]
+
+    @field_validator("hostnames")
+    @classmethod
+    def _validate_hostnames(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("At least one hostname is required.")
+        if len(value) > 100:
+            raise ValueError("At most 100 hostnames per request.")
+        return value
+
+
+class MonitorBulkRow(ContractModel):
+    hostname: str
+    accepted: bool
+    monitor: MonitoredHostname | None
+    reason_code: ErrorCode | None
+    reason: str | None
+
+
+class MonitorBulkResponse(ContractModel):
+    results: list[MonitorBulkRow]
+    accepted_count: int
+    rejected_count: int

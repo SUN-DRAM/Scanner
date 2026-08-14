@@ -665,7 +665,7 @@ Closed set of error codes and their HTTP statuses:
 | `VALIDATION_ERROR` | 422 | request body fails schema |
 | `INVALID_HOSTNAME` | 400 | normalisation rejected the input |
 | `BLOCKED_TARGET` | 400 | private/reserved address or blocklisted host |
-| `RATE_LIMITED` | 429 | per-IP or per-hostname limit hit |
+| `RATE_LIMITED` | 429 | per-IP or per-hostname limit hit; extended in Phase 2 to the per-monitor manual-rescan limit (§7.8) |
 | `SCAN_NOT_FOUND` | 404 | unknown `scan_id` or `public_slug` |
 | `SCAN_FAILED` | 200 | *not an HTTP error* — returned inside `Scan.error` |
 | `UPSTREAM_TIMEOUT` | 504 | our own dependency timed out |
@@ -755,6 +755,63 @@ PATCH /api/v1/orgs/current
 `POST /api/v1/orgs/current/members` — `{ "email": "...", "role": "member" }` → `MembershipWithEmail`. If the email is already a member, this updates their role instead of erroring (`200`, not `201`) — deliberate: no separate "change role" endpoint exists yet, and re-inviting to change a role is a reasonable idempotent action rather than a conflict. If the email has no `User` yet, one is created unverified — the invited person's first OTP login (§7.6) finds it and attaches to this org, never a second personal org.
 
 Only `owner`/`admin` can reach the three member-management endpoints; `member` gets `403 FORBIDDEN`. Removing the last remaining `owner` from an org is refused with `403 FORBIDDEN` — an ownerless org is an unrecoverable state through any endpoint this contract defines.
+
+### 7.8 Monitored hostname endpoints (Phase 2 Step 3)
+
+| Method | Path | Purpose | Success |
+|---|---|---|---|
+| GET | `/api/v1/monitors` | list the org's monitors, paginated | 200 |
+| POST | `/api/v1/monitors` | add one hostname to monitor | 201 |
+| GET | `/api/v1/monitors/{monitor_id}` | fetch one | 200 |
+| PATCH | `/api/v1/monitors/{monitor_id}` | rename, annotate, pause/resume | 200 |
+| DELETE | `/api/v1/monitors/{monitor_id}` | stop monitoring it | 204 |
+| POST | `/api/v1/monitors/bulk` | add up to 100 at once | 200 |
+| POST | `/api/v1/monitors/{monitor_id}/scan` | trigger an immediate re-scan | 202 |
+
+`POST /api/v1/monitors` and `POST /api/v1/monitors/bulk` reuse §7.2 hostname normalisation and §10's safety guard exactly as `POST /api/v1/scans` does — no parallel validation path. A hostname that doesn't currently resolve is still accepted (the monitor starts `active` and a later scan attempt reports it, the same "not an HTTP error" treatment §7.4 gives public scans); a `BLOCKED_TARGET` address is rejected synchronously, same as `POST /api/v1/scans`.
+
+```json
+POST /api/v1/monitors
+{ "hostname": "example.com", "port": 443, "label": "Production", "notes": null }
+-> 201 MonitoredHostname (§6.9)
+   400 INVALID_HOSTNAME | BLOCKED_TARGET
+   402 QUOTA_EXCEEDED
+   409 DUPLICATE_HOSTNAME
+
+GET /api/v1/monitors?state=active&page=1&per_page=25
+-> 200 PaginatedList<MonitoredHostname>
+
+PATCH /api/v1/monitors/{monitor_id}
+{ "label": "Renamed", "state": "paused" }
+-> 200 MonitoredHostname | 404 NOT_FOUND
+
+POST /api/v1/monitors/bulk
+{ "hostnames": ["a.example.com", "b.example.com:8443", "not a host"] }
+-> 200
+{
+  "results": [
+    { "hostname": "a.example.com", "accepted": true, "monitor": { /* MonitoredHostname */ }, "reason_code": null, "reason": null },
+    { "hostname": "b.example.com:8443", "accepted": true, "monitor": { /* MonitoredHostname */ }, "reason_code": null, "reason": null },
+    { "hostname": "not a host", "accepted": false, "monitor": null, "reason_code": "INVALID_HOSTNAME", "reason": "'not a host' is not a valid hostname." }
+  ],
+  "accepted_count": 2,
+  "rejected_count": 1
+}
+   422 VALIDATION_ERROR — empty list, or more than 100 hostnames
+
+POST /api/v1/monitors/{monitor_id}/scan
+-> 202 ScanCreateResponse (§7.1) — cached is always false, a manual re-scan bypasses the scan cache by design
+   404 NOT_FOUND
+   429 RATE_LIMITED { "retry_after_seconds": 480 }
+```
+
+Rules:
+- `GET /api/v1/monitors` is filterable by `state` (`?state=active`, one `MonitorState` value) and always ordered by `days_until_expiry` ascending with nulls last — the one sortable field the phase prompt names, and Step 7's dashboard confirms it as the default ("soonest expiry first. That column is the product."), so there is no `sort`/`order` query param to choose a different one.
+- `DUPLICATE_HOSTNAME` is scoped to `(hostname, port)` together within an org — not specified by the phase prompt, but `example.com:443` and `example.com:8443` are different monitoring targets, matching how §10's own port allowlist already treats them as distinct scan targets.
+- `QUOTA_EXCEEDED`'s `details` (deferred by v2.0's amendment note, closed here): `{ "current": 3, "limit": 3, "plan_code": "free", "upgrade_to": "watch" }` — `current`/`limit` count monitors in `active`/`paused`/`verification_pending` state (a `quota_blocked` monitor is already excluded from the count it's blocked by, so it can't double-count against itself); `upgrade_to` is the next purchasable plan from `app/plans.py`, or `null` from `watch_pro` (no further purchasable plan exists in Phase 2). `POST /api/v1/monitors/bulk` applies this per row, in order — once a batch exhausts the remaining quota, later rows in the same request are rejected with `QUOTA_EXCEEDED` too, not silently accepted over the limit.
+- `POST /api/v1/monitors/{monitor_id}/scan` extends `RATE_LIMITED` (§7.4) with a third scope beyond per-IP/per-hostname: one manual re-scan per monitor per 10 minutes.
+- `PATCH` accepts `label`, `notes`, and `state` — only the keys present in the request body are changed (a field simply omitted is left as-is; sent explicitly as `null` clears `label`/`notes`). `state` only accepts `"active"`/`"paused"` through this endpoint: `quota_blocked` and `verification_pending` are system-managed, not user-settable.
+- Every endpoint here is scoped to `current_org` (§7.6) and requires `owner` or `admin`; `member` reaches only the two `GET`s (`403 FORBIDDEN` on write). A `monitor_id` belonging to a different org is `404 NOT_FOUND`, never `403`, matching the cross-org rule established in §7.6/§7.7.
 
 ---
 
@@ -1014,3 +1071,4 @@ A phase is complete only when all of these are true:
 | 1.4 | 2026-08-11 | Gate A follow-ups A2 and A4 (`docs/GATE_A_FOLLOWUPS.md`), closed before Gate C. **A2:** §8 `CERT_WEAK_SIGNATURE` now scoped to every certificate in the presented chain except the self-signed root, with `evidence.position` naming which one — was leaf-only. New §8 code `TLS_WEAK_KEY_EXCHANGE` (tls, high); new §6.4 `tls.data.key_exchange` field (`type`/`bits`/`curve`, each nullable — `bits`/`curve` are null in every live scan today since pyOpenSSL exposes no negotiated-group getter, confirmed by direct introspection, not assumed; the finding only fires when `bits` is actually known, never guessed per §10). **A4:** `DOMAIN_EXPIRING_CRITICAL` demoted from critical to high — a WHOIS-derived finding must not be able to force a healthy TLS setup to `F` on its own. §9 Step 4: `DOMAIN_EXPIRING_CRITICAL`/`DOMAIN_EXPIRING_SOON` excluded from both grade-cap overrides entirely (still scored normally in Step 1, still shown at their own severity). Finding copy for both now explicitly attributes the claim to "the registry record" rather than the scanner's own voice. Test-hygiene items A3 (network-dependent tests marked and excluded from the default `pytest` run) and A5 (classifier-level unit coverage for `TLS_WEAK_CIPHER`/`TLS_WEAK_KEY_EXCHANGE`) closed alongside this amendment but don't change the contract itself. |
 | 2.0 | 2026-08-14 | Phase 2 Step 1: accounts, orgs, monitoring, alerts, billing — contract surface only, no implementation yet (`docs/PHASE_2_PROMPT.md` Step 1). New §5 enums: `UserRole`, `PlanCode`, `SubscriptionState`, `BillingProvider`, `BillingInterval`, `Currency`, `AlertType`, `AlertChannel`, `AlertState`, `MonitorState`, `OtpPurpose`, and `InvoiceState` (**CONTRACT GAP** — not named by the phase prompt, proposed as `"open" \| "paid" \| "void" \| "uncollectible"`, needs explicit sign-off). New §5.1 `app/plans.py` pricing table (`free`/`watch`/`watch_pro` purchasable; `secure`/`compliance` enum-only, "contact us" at checkout). New §6.6–§6.13 data shapes: `User`, `Organisation`, `Membership`, `MonitoredHostname`, `AlertRecipient`, `AlertEvent`, `Subscription`, `Invoice`. New §6.14 paginated list envelope (`per_page` max `100` — proposed, not specified). New §4 var `SESSION_SECRET` (proposed name/mechanism — not specified). New §7.6 auth scheme: httpOnly/Secure/SameSite=Lax session cookie (`sd_session`, name proposed), 30-day sliding session, email OTP only, role enforcement via dependency, cross-org ids 404 not 403. §7.4 error table gains `UNAUTHENTICATED`, `FORBIDDEN`, `OTP_INVALID`, `OTP_EXPIRED`, `OTP_RATE_LIMITED`, `QUOTA_EXCEEDED`, `PLAN_REQUIRED`, `DUPLICATE_HOSTNAME`. Deliberately **not** in this amendment: `Organisation` alert-preference fields (timezone/quiet-hours/digest — Step 5's concern), Razorpay/Stripe env vars (Step 6's concern), the `QUOTA_EXCEEDED` error `details` payload shape (Step 3's concern) — adding them now ahead of the step that actually needs them would be exactly the "generated but not yet defined" drift rule 9 exists to prevent. |
 | 2.1 | 2026-08-14 | Phase 2 Step 2 implementation: OTP auth, users/orgs/memberships, session cookie, role enforcement (`docs/PHASE_2_PROMPT.md` Step 2). Two necessary additions discovered while building it, not anticipated by v2.0, flagged rather than silently assumed: new §4 vars `RESEND_API_KEY`/`EMAIL_FROM_ADDRESS` (OTP delivery needs a real provider now, before Step 5's own `app/notify/email.py` was going to exist — that module is built early, in Step 2, for exactly this reason) and new §7.4 code `NOT_FOUND` (404) — §7.6's "cross-org id returns 404" rule had nothing to return, since `SCAN_NOT_FOUND` is scan-specific; used from the new §7.7 member endpoints onward, and will cover monitors in Step 3. New §7.7: concrete request/response shapes for every §Step 2 endpoint, `MembershipWithEmail` (§6.8 `Membership` plus `email` — a member list is unusable without it, not a new top-level shape). Member invite is idempotent (re-inviting an existing member updates their role, `200`, rather than a conflict `409` — no separate role-change endpoint exists yet). Removing an org's last `owner` is refused (`403`) rather than left possible. `PATCH /api/v1/orgs/current` scoped to `name` only — `country`/`currency` stay locked until Step 6's "changeable only before the first subscription" rule has somewhere to live. Human sign-off received on all four items v2.0 proposed pending confirmation: `InvoiceState` (`"open" \| "paid" \| "void" \| "uncollectible"`), `SESSION_SECRET` as the env var name/mechanism, `sd_session` as the cookie name, and `100` as the pagination `per_page` ceiling — none of these values changed, only their status from proposed to confirmed. |
+| 2.2 | 2026-08-14 | Phase 2 Step 3 implementation: monitored hostnames (`docs/PHASE_2_PROMPT.md` Step 3). New §7.8: the seven `/api/v1/monitors...` endpoints, closing the `QUOTA_EXCEEDED` `details` shape v2.0 deliberately deferred (`{"current", "limit", "plan_code", "upgrade_to"}`, the last read from `app/plans.py`'s purchasable-plan ordering, never hardcoded). `RATE_LIMITED` (§7.4) extended, not duplicated, for the new one-manual-rescan-per-monitor-per-10-minutes limit. Two scoping decisions not specified by the phase prompt, made and documented rather than left implicit: `DUPLICATE_HOSTNAME` keys on `(hostname, port)` together, not hostname alone (port 443 and 8443 are different monitoring targets, same as §10's own allowlist treats them); quota accounting counts `active`/`paused`/`verification_pending` monitors only, so a `quota_blocked` monitor doesn't count against the very quota it's blocked by. `POST /api/v1/monitors` and `/monitors/bulk` reuse §7.2/§10 exactly as `POST /api/v1/scans` does — an unresolvable hostname is still accepted (not an HTTP error, same treatment as a public scan), a `BLOCKED_TARGET` address is rejected synchronously. Internal-only additions, not part of the JSON contract: `monitored_hostnames` table, a nullable `scans.monitor_id` FK (set when a scan is enqueued on a monitor's behalf, read back by `app/monitors.py` when that scan completes to update the monitor's denormalised `last_grade`/`last_score`/`last_scanned_at` and the certificate-expiry timestamp `days_until_expiry` is derived from). |

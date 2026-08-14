@@ -21,6 +21,7 @@ from app.enums import ModuleName, ScanStatus, Severity
 from app.errors import ApiError, ApiException, ErrorCode
 from app.grading import ModuleScoreInput, grade_scan
 from app.models import ScanRecord
+from app.monitors import update_monitor_after_scan
 from app.safety import HostnameResolutionError, resolve_and_validate
 from app.scanner import (
     ScanContext,
@@ -261,6 +262,27 @@ async def _run_and_persist(
     record.duration_ms = duration_ms
     await increment_daily_stat(session, "scans_completed", when=completed_at)
     await session.commit()
+
+    # Phase 2 Step 3: a scan enqueued on a MonitoredHostname's behalf
+    # (record.monitor_id set — app/monitors.py's create_manual_rescan today,
+    # Step 4's scheduler later) updates that monitor's denormalised
+    # last_grade/last_score/last_scanned_at here, the one place a scan
+    # result is ever persisted as completed. Never on a failed scan (see the
+    # early-return branches above) — a transient failure must not overwrite
+    # the monitor's last known-good grade with nothing.
+    if record.monitor_id is not None:
+        cert_not_after = None
+        if modules.certificate is not None and modules.certificate.data is not None:
+            cert_not_after = modules.certificate.data.not_after
+        await update_monitor_after_scan(
+            session,
+            record,
+            grade=grading_result.overall_grade,
+            score=grading_result.overall_score,
+            cert_not_after=cert_not_after,
+            scanned_at=completed_at,
+        )
+
     return scan
 
 

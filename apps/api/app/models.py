@@ -15,6 +15,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -49,10 +50,22 @@ class ScanRecord(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     duration_ms: Mapped[int | None] = mapped_column(Integer)
+    # Phase 2 Step 3. Null for every public, unauthenticated scan (Phase 1's
+    # only kind) — set only when app/monitors.py or the Step 4 scheduler
+    # enqueues a scan on behalf of a MonitoredHostname, so that scan's
+    # completion can update that monitor's denormalised last_grade/
+    # last_score/last_scanned_at (see app/monitors.py's
+    # update_monitor_after_scan, called from scanner/orchestrator.py). Not
+    # part of the JSON contract's Scan shape (§6.1) — an internal linkage
+    # column only.
+    monitor_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("monitored_hostnames.monitor_id")
+    )
 
     __table_args__ = (
         Index("scans_hostname_created_idx", "hostname", text("created_at DESC")),
         Index("scans_status_idx", "status"),
+        Index("scans_monitor_id_idx", "monitor_id", text("created_at DESC")),
     )
 
 
@@ -185,6 +198,55 @@ class SessionRecord(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (Index("sessions_user_id_idx", "user_id"),)
+
+
+class MonitoredHostnameRecord(Base):
+    """Contract §6.9 `MonitoredHostname`. Reuses §7.2 normalisation and §10
+    safety guard unchanged before a row is ever created — app/monitors.py,
+    never a parallel validation path."""
+
+    __tablename__ = "monitored_hostnames"
+
+    monitor_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organisations.org_id"), nullable=False
+    )
+    hostname: Mapped[str] = mapped_column(String(253), nullable=False)
+    port: Mapped[int] = mapped_column(Integer, nullable=False, server_default="443")
+    state: Mapped[str] = mapped_column(String(24), nullable=False, server_default="active")
+    label: Mapped[str | None] = mapped_column(String(200))
+    notes: Mapped[str | None] = mapped_column(Text)
+    last_scan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("scans.scan_id")
+    )
+    last_grade: Mapped[str | None] = mapped_column(String(2))
+    last_score: Mapped[int | None] = mapped_column(Integer)
+    last_scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Not part of the JSON contract: §6.9's `days_until_expiry` is a
+    # countdown that moves every day without a new scan, so it is derived at
+    # serialisation time (app/monitors.py) from this timestamp rather than
+    # stored as a stale integer. Set alongside last_grade/last_score/
+    # last_scanned_at whenever a linked scan completes.
+    cert_not_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        # Not specified by the phase prompt: "hostname already monitored in
+        # this org" (§7.4 DUPLICATE_HOSTNAME) is scoped to (org_id, hostname,
+        # port) together, not hostname alone — example.com:443 and
+        # example.com:8443 are different monitoring targets, matching how
+        # §10's own port allowlist treats them as distinct scan targets.
+        UniqueConstraint(
+            "org_id", "hostname", "port", name="uq_monitored_hostnames_org_hostname_port"
+        ),
+        Index("monitored_hostnames_org_id_idx", "org_id"),
+        Index("monitored_hostnames_state_idx", "state"),
+    )
 
 
 class DailyStatsRecord(Base):
