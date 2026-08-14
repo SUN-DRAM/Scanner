@@ -15,15 +15,15 @@ import hashlib
 import secrets
 import string
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.enums import Grade, MonitorState, PlanCode, ScanStatus
+from app.enums import AlertState, AlertType, Grade, MonitorState, PlanCode, ScanStatus, Severity
 from app.errors import ApiException, ErrorCode
-from app.models import MonitoredHostnameRecord, OrganisationRecord, ScanRecord
+from app.models import AlertEventRecord, MonitoredHostnameRecord, OrganisationRecord, ScanRecord
 from app.plans import get_plan, next_purchasable_plan
 from app.safety import (
     HostnameResolutionError,
@@ -191,10 +191,89 @@ async def update_monitor_after_scan(
     monitor.last_score = score
     monitor.last_scanned_at = scanned_at
     monitor.cert_not_after = cert_not_after
+    monitor.consecutive_failures = 0
     await session.commit()
 
 
-# --- manual re-scan (§7.8 POST /monitors/{monitor_id}/scan) ---
+# --- Step 4: retry backoff and scan_failure alert firing ---
+
+# 5 minutes, 30 minutes, 2 hours (§Step 4) — fixed by the phase prompt, not
+# a tunable, unlike the env-configurable rate limits above.
+FAILURE_BACKOFF_SECONDS: tuple[int, ...] = (300, 1800, 7200)
+
+
+async def _fire_scan_failure_alert(session: AsyncSession, monitor: MonitoredHostnameRecord) -> None:
+    """Records a `scan_failure` `AlertEvent` (§6.11) once a monitor's
+    retries are exhausted. This only *fires* the event — the dedup-on-
+    `sent`-state rule, quiet hours, digest batching, and actual delivery
+    are Step 5's alert engine, built on top of this same table. The guard
+    below only stops a second `pending` row piling up before Step 5's
+    engine has processed the first one; once that one reaches `sent`, a
+    later failure streak (which requires a success — and consecutive_
+    failures resetting to 0 — in between) can fire a new one."""
+    dedupe_key = f"{monitor.monitor_id}:scan_failure:exhausted"
+    existing = await session.execute(
+        select(AlertEventRecord).where(
+            AlertEventRecord.dedupe_key == dedupe_key,
+            AlertEventRecord.state == AlertState.PENDING.value,
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        return
+
+    now = datetime.now(UTC)
+    session.add(
+        AlertEventRecord(
+            alert_id=uuid.uuid4(),
+            org_id=monitor.org_id,
+            monitor_id=monitor.monitor_id,
+            type=AlertType.SCAN_FAILURE.value,
+            state=AlertState.PENDING.value,
+            severity=Severity.HIGH.value,
+            subject=f"{monitor.hostname} — scan failed after retries",
+            dedupe_key=dedupe_key,
+            scheduled_for=now,
+            sent_at=None,
+            # Step 5 resolves real AlertRecipient rows before delivery —
+            # nothing sends off a `pending` event, so an empty list here
+            # is not a bug, just unfinished by design until that step.
+            recipients=[],
+            payload={"hostname": monitor.hostname, "monitor_id": str(monitor.monitor_id)},
+        )
+    )
+
+
+async def record_scan_failure(session: AsyncSession, scan_record: ScanRecord) -> None:
+    """Called by `scanner/orchestrator.py`'s `_mark_failed` for any failed
+    scan tied to a monitor (scheduled or manual — both count toward the
+    same retry streak). Advances `consecutive_failures`; while under the
+    retry ceiling, reschedules the monitor at the matching backoff delay
+    so the next scheduler tick retries it — the scheduler's own 5-minute
+    polling cadence *is* the retry mechanism, no separate retry job exists.
+    Once exhausted, fires the `scan_failure` alert instead of rescheduling
+    early (the monitor still resumes its normal interval, already set at
+    claim time by app/scheduler.py, or immediately for a manual rescan's
+    failure — see routers/monitors.py)."""
+    if scan_record.monitor_id is None:
+        return
+    monitor = await session.get(MonitoredHostnameRecord, scan_record.monitor_id)
+    if monitor is None:
+        return
+
+    monitor.last_scanned_at = datetime.now(UTC)
+    monitor.consecutive_failures += 1
+
+    if monitor.consecutive_failures <= len(FAILURE_BACKOFF_SECONDS):
+        backoff = FAILURE_BACKOFF_SECONDS[monitor.consecutive_failures - 1]
+        monitor.next_scan_at = datetime.now(UTC) + timedelta(seconds=backoff)
+    else:
+        await _fire_scan_failure_alert(session, monitor)
+
+    await session.commit()
+
+
+# --- shared scan-record creation (manual rescan and, via app/scheduler.py,
+# a scheduled one both go through this — no parallel code path) ---
 
 _SLUG_LENGTH = 12
 _SLUG_ALPHABET = string.ascii_letters + string.digits
@@ -205,17 +284,14 @@ def _generate_public_slug() -> str:
     return "".join(secrets.choice(_SLUG_ALPHABET) for _ in range(_SLUG_LENGTH))
 
 
-async def create_manual_rescan(
-    session: AsyncSession, monitor: MonitoredHostnameRecord, *, client_ip: str
+async def create_monitor_scan_record(
+    session: AsyncSession, monitor: MonitoredHostnameRecord, *, client_ip_hash: str | None
 ) -> ScanRecord:
-    """Creates a queued `scans` row with `monitor_id` set for §7.8's manual
-    re-scan endpoint. Mirrors `routers/scans.py`'s own scan-record creation
-    (same public_slug collision-retry mechanics) but kept as its own small
-    copy rather than a shared helper: that endpoint's request has no
-    monitor to attach, and this one always bypasses the scan cache, so
-    there is little left to actually share beyond slug generation."""
-    ip_hash = hashlib.sha256(client_ip.encode("utf-8")).hexdigest()
-
+    """Creates a queued `scans` row with `monitor_id` set. `client_ip_hash`
+    is `None` for a scheduler-triggered scan (nothing to hash — Step 4's
+    cron job, not a request) and a real hash for a manual rescan
+    (`create_manual_rescan` below), mirroring `routers/scans.py`'s own
+    scan-record creation (same public_slug collision-retry mechanics)."""
     for _ in range(_MAX_SLUG_ATTEMPTS):
         record = ScanRecord(
             scan_id=uuid.uuid4(),
@@ -223,7 +299,7 @@ async def create_manual_rescan(
             hostname=monitor.hostname,
             port=monitor.port,
             status=ScanStatus.QUEUED.value,
-            client_ip_hash=ip_hash,
+            client_ip_hash=client_ip_hash,
             monitor_id=monitor.monitor_id,
         )
         session.add(record)
@@ -238,3 +314,12 @@ async def create_manual_rescan(
     raise ApiException(
         ErrorCode.INTERNAL_ERROR, "Could not allocate a unique share link. Try again."
     )
+
+
+async def create_manual_rescan(
+    session: AsyncSession, monitor: MonitoredHostnameRecord, *, client_ip: str
+) -> ScanRecord:
+    """Creates a queued `scans` row with `monitor_id` set for §7.8's manual
+    re-scan endpoint."""
+    ip_hash = hashlib.sha256(client_ip.encode("utf-8")).hexdigest()
+    return await create_monitor_scan_record(session, monitor, client_ip_hash=ip_hash)

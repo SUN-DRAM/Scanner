@@ -570,3 +570,17 @@ class MonitorBulkResponse(ContractModel):
     results: list[MonitorBulkRow]
     accepted_count: int
     rejected_count: int
+
+
+class MonitorHistoryEntry(ContractModel):
+    """§Step 4: `GET /monitors/{monitor_id}/history`'s "grade and score
+    timeline" — one row per scan (scheduled or manual) ever run against a
+    monitor, newest first. Not a §6 top-level shape of its own; a thin
+    projection of the same `Scan` (§6.1) rows already queryable by
+    `monitor_id` (`scans.monitor_id`, Step 4)."""
+
+    scan_id: str
+    status: ScanStatus
+    grade: Grade | None
+    score: int | None
+    scanned_at: UtcDatetime

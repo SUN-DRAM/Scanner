@@ -1,6 +1,6 @@
 """GET/POST /api/v1/monitors, GET/PATCH/DELETE /api/v1/monitors/{monitor_id},
-POST /api/v1/monitors/bulk, POST /api/v1/monitors/{monitor_id}/scan
-(contract §7.8).
+POST /api/v1/monitors/bulk, POST /api/v1/monitors/{monitor_id}/scan,
+GET /api/v1/monitors/{monitor_id}/history (contract §7.8).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from app.db import get_session
 from app.deps import CurrentOrgContext, get_current_org_context, require_roles
 from app.enums import MonitorState, ScanStatus, UserRole
 from app.errors import ApiException, ErrorCode
-from app.models import MonitoredHostnameRecord
+from app.models import MonitoredHostnameRecord, ScanRecord
 from app.monitors import (
     compute_days_until_expiry,
     count_quota_monitors,
@@ -34,6 +34,7 @@ from app.schemas import (
     MonitorBulkRow,
     MonitorCreateRequest,
     MonitoredHostname,
+    MonitorHistoryEntry,
     MonitorUpdateRequest,
     PaginatedList,
     ScanCreateResponse,
@@ -282,4 +283,49 @@ async def trigger_manual_scan(
         # A manual re-scan always bypasses the scan cache (§7.8) — that's
         # the whole point of the button — so this is never true.
         cached=False,
+    )
+
+
+@router.get("/{monitor_id}/history", response_model=PaginatedList[MonitorHistoryEntry])
+async def get_monitor_history(
+    monitor_id: str,
+    context: CurrentOrgContext = Depends(get_current_org_context),
+    session: AsyncSession = Depends(get_session),
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=25, ge=1, le=_MAX_PER_PAGE),
+) -> PaginatedList[MonitorHistoryEntry]:
+    # Confirms the monitor exists in this org before returning any history —
+    # otherwise a cross-org id would leak "this monitor exists" via an empty
+    # (rather than 404) history list, the same class of leak §7.6 forbids.
+    await _get_org_monitor(session, context.org.org_id, monitor_id)
+    monitor_uuid = uuid.UUID(monitor_id)
+
+    base_stmt = select(ScanRecord).where(ScanRecord.monitor_id == monitor_uuid)
+    total = (
+        await session.execute(select(func.count()).select_from(base_stmt.subquery()))
+    ).scalar_one()
+
+    stmt = (
+        base_stmt.order_by(ScanRecord.created_at.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    items = [
+        MonitorHistoryEntry(
+            scan_id=str(row.scan_id),
+            status=ScanStatus(row.status),
+            grade=row.overall_grade,  # type: ignore[arg-type]
+            score=row.overall_score,
+            scanned_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+    return PaginatedList(
+        items=items,
+        page=page,
+        per_page=per_page,
+        total=total,
+        has_more=(page * per_page) < total,
     )

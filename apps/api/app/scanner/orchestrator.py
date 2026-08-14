@@ -21,7 +21,7 @@ from app.enums import ModuleName, ScanStatus, Severity
 from app.errors import ApiError, ApiException, ErrorCode
 from app.grading import ModuleScoreInput, grade_scan
 from app.models import ScanRecord
-from app.monitors import update_monitor_after_scan
+from app.monitors import record_scan_failure, update_monitor_after_scan
 from app.safety import HostnameResolutionError, resolve_and_validate
 from app.scanner import (
     ScanContext,
@@ -158,6 +158,14 @@ async def _mark_failed(
     record.result = scan.model_dump(mode="json")
     await increment_daily_stat(session, "scans_failed", when=completed_at)
     await session.commit()
+
+    # Phase 2 Step 4: a failed scan tied to a monitor (scheduled or manual)
+    # advances its retry-backoff streak, or fires a scan_failure alert once
+    # retries are exhausted — the one place any scan is ever marked failed,
+    # so there is no second path that could skip this.
+    if record.monitor_id is not None:
+        await record_scan_failure(session, record)
+
     return scan
 
 

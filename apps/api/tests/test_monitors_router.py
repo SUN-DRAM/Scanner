@@ -16,7 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.db import get_session
+from app.enums import ScanStatus
 from app.main import app
+from app.models import ScanRecord
 from app.notify.email import get_email_sender
 from app.ratelimit import hash_for_bucket
 from app.redis_client import get_arq_pool, get_redis_client
@@ -349,3 +351,68 @@ async def test_manual_scan_enqueues_a_job_and_rate_limits_a_second_call(
     second_scan = await owner_client.post(f"/api/v1/monitors/{monitor_id}/scan")
     assert second_scan.status_code == 429
     assert second_scan.json()["error"]["code"] == "RATE_LIMITED"
+
+
+@pytest.mark.asyncio
+async def test_history_returns_the_grade_and_score_timeline_newest_first(
+    owner_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    create_response = await owner_client.post(
+        "/api/v1/monitors", json={"hostname": _random_hostname(), "port": 443}
+    )
+    monitor_id = uuid.UUID(create_response.json()["monitor_id"])
+
+    older = ScanRecord(
+        scan_id=uuid.uuid4(),
+        public_slug=uuid.uuid4().hex[:12],
+        hostname="irrelevant.example.com",
+        port=443,
+        status=ScanStatus.COMPLETED.value,
+        overall_grade="B",
+        overall_score=80,
+        monitor_id=monitor_id,
+    )
+    newer = ScanRecord(
+        scan_id=uuid.uuid4(),
+        public_slug=uuid.uuid4().hex[:12],
+        hostname="irrelevant.example.com",
+        port=443,
+        status=ScanStatus.COMPLETED.value,
+        overall_grade="A",
+        overall_score=96,
+        monitor_id=monitor_id,
+    )
+    db_session.add(older)
+    await db_session.commit()
+    db_session.add(newer)
+    await db_session.commit()
+
+    response = await owner_client.get(f"/api/v1/monitors/{monitor_id}/history")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 2
+    assert [item["grade"] for item in body["items"]] == ["A", "B"]
+    assert body["items"][0]["scan_id"] == str(newer.scan_id)
+    assert body["items"][0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_history_for_a_cross_org_monitor_id_returns_404(
+    owner_client: AsyncClient,
+    _wired_app: None,
+    fake_email_sender: FakeEmailSender,
+    redis_client: Redis,
+) -> None:
+    other_owner_client = await _new_client(_wired_app)
+    try:
+        await _login(other_owner_client, fake_email_sender, _random_email())
+        create_response = await other_owner_client.post(
+            "/api/v1/monitors", json={"hostname": _random_hostname(), "port": 443}
+        )
+        monitor_id = create_response.json()["monitor_id"]
+
+        response = await owner_client.get(f"/api/v1/monitors/{monitor_id}/history")
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "NOT_FOUND"
+    finally:
+        await other_owner_client.aclose()

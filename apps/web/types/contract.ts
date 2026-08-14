@@ -515,6 +515,18 @@ export interface QuotaExceededDetails {
   upgrade_to: PlanCode | null;
 }
 
+// §Step 4: GET /monitors/{monitor_id}/history's "grade and score
+// timeline" — one row per scan (scheduled or manual) run against a
+// monitor, newest first. Not a §6 top-level shape; a thin projection of
+// the same Scan (§6.1) rows already queryable by scans.monitor_id.
+export interface MonitorHistoryEntry {
+  scan_id: string;
+  status: ScanStatus;
+  grade: Grade | null;
+  score: number | null;
+  scanned_at: string;
+}
+
 // GET /api/v1/monitors?state=&page=&per_page= -> PaginatedList<MonitoredHostname>
 //   Always ordered by days_until_expiry ascending, nulls last — the one
 //   sortable field the phase prompt names, no `sort`/`order` query param.
@@ -524,3 +536,4 @@ export interface QuotaExceededDetails {
 // DELETE /api/v1/monitors/{monitor_id} -> 204 No Content | 404 NOT_FOUND
 // POST /api/v1/monitors/bulk -> MonitorBulkResponse (200)
 // POST /api/v1/monitors/{monitor_id}/scan -> ScanCreateResponse (202) | 404 NOT_FOUND | 429 RATE_LIMITED
+// GET /api/v1/monitors/{monitor_id}/history?page=&per_page= -> PaginatedList<MonitorHistoryEntry>

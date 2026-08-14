@@ -231,6 +231,14 @@ class MonitoredHostnameRecord(Base):
     # stored as a stale integer. Set alongside last_grade/last_score/
     # last_scanned_at whenever a linked scan completes.
     cert_not_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Phase 2 Step 4. Not part of the JSON contract. Incremented by
+    # app/monitors.py's record_scan_failure on every failed scan tied to
+    # this monitor (scheduled or manual), reset to 0 on the next success —
+    # drives the retry-backoff schedule and the scan_failure alert firing
+    # threshold (§Step 4).
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -246,6 +254,47 @@ class MonitoredHostnameRecord(Base):
         ),
         Index("monitored_hostnames_org_id_idx", "org_id"),
         Index("monitored_hostnames_state_idx", "state"),
+    )
+
+
+class AlertEventRecord(Base):
+    """Contract §6.11 `AlertEvent`. Phase 2 Step 4 is the first writer —
+    app/monitors.py's scan_failure firing, once a monitor's retries are
+    exhausted — but not the only one: Step 5 builds the other four
+    `AlertType`s, dedup-on-`sent`-state, quiet hours, digest batching, and
+    actual delivery on top of this same table, not a parallel one. No
+    Pydantic schema exists yet (schemas.py/contract.ts) because nothing
+    serialises this to JSON until Step 5's `/app/alerts` dashboard reads
+    it — adding one now, ahead of that, is exactly the "generated but not
+    yet defined" drift CONTRACT.md rule 9 exists to prevent."""
+
+    __tablename__ = "alert_events"
+
+    alert_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organisations.org_id"), nullable=False
+    )
+    monitor_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("monitored_hostnames.monitor_id"), nullable=False
+    )
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recipients: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("alert_events_dedupe_key_idx", "dedupe_key"),
+        Index("alert_events_org_id_idx", "org_id"),
     )
 
 

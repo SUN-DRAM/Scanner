@@ -59,6 +59,14 @@ class Settings(BaseSettings):
     # it, the same "empty = opt-in" pattern as SENTRY_DSN/ADMIN_TOKEN.
     resend_api_key: str = Field(default="", alias="RESEND_API_KEY")
     email_from_address: str = Field(default="", alias="EMAIL_FROM_ADDRESS")
+    # Phase 2 Step 4. Bounds concurrent scheduler-enqueued scans via a Redis
+    # semaphore (app/scheduler.py) — deliberately well under worker.py's
+    # max_jobs=10 so public scans and manual re-scans always have headroom
+    # in the shared arq queue, even during a full scheduled cycle ("a
+    # scheduled backlog must never starve interactive public scans").
+    scheduler_max_concurrent_scans: int = Field(
+        default=3, alias="SCHEDULER_MAX_CONCURRENT_SCANS"
+    )
 
     @field_validator("cors_origins")
     @classmethod
