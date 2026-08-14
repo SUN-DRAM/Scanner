@@ -9,6 +9,7 @@ export const metadata: Metadata = {
   title: "100-day certificates in 2027 — what changes and how to prepare",
   description:
     "From 15 March 2027 the CA/Browser Forum caps new TLS certificates at 100 days. Here's what's actually changing, why, and how to be ready.",
+  alternates: { canonical: "/guides/100-day-certificate-2027" },
 };
 
 export default async function HundredDayCertificate2027Guide() {

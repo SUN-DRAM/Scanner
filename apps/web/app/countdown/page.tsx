@@ -7,6 +7,7 @@ import { formatIsoDateDisplay } from "@/lib/format";
 export const metadata: Metadata = {
   title: "2027 certificate lifetime countdown",
   description: "The CA/Browser Forum's certificate lifetime phase-down, and what changes when.",
+  alternates: { canonical: "/countdown" },
 };
 
 const PHASE_LABEL: Record<string, string> = {

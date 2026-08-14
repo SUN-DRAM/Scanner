@@ -7,6 +7,7 @@ export const metadata: Metadata = {
   title: "SSL certificate expiry monitoring — free automated checker",
   description:
     "Why manual certificate tracking fails, what proper expiry monitoring actually checks, and a free tool to see where you stand right now.",
+  alternates: { canonical: "/guides/ssl-certificate-expiry-monitoring" },
 };
 
 export default function SslExpiryMonitoringGuide() {

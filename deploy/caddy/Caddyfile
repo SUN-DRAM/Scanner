@@ -5,16 +5,37 @@
 # CAA record naming this CA). {$CADDY_EMAIL} is read from the host's
 # environment (see .env.production.example) — ACME needs a real contact
 # address for expiry/revocation notices.
+#
+# The global acme_ca line only sets the URL of Caddy's *default* ACME
+# issuer — it does not, by itself, remove Caddy's built-in ZeroSSL fallback
+# issuer, which automatic HTTPS otherwise adds for redundancy. Once the CAA
+# record authorises only letsencrypt.org (Phase 2 Step 0.4), any fallback
+# attempt against ZeroSSL is just a CAA-rejected issuance that delays
+# renewal for no benefit. The `tls` block on each site below pins the
+# issuer list to Let's Encrypt explicitly and only, so there's no fallback
+# path left that could clash with the CAA record.
 {
 	email {$CADDY_EMAIL}
 	acme_ca https://acme-v02.api.letsencrypt.org/directory
 }
 
 www.sundram.tech {
+	tls {$CADDY_EMAIL} {
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+		}
+	}
+
 	redir https://sundram.tech{uri} permanent
 }
 
 sundram.tech {
+	tls {$CADDY_EMAIL} {
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+		}
+	}
+
 	encode zstd gzip
 
 	header {

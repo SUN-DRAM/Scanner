@@ -6,6 +6,7 @@ export const metadata: Metadata = {
   title: "Certbot alternatives for Docker — automated TLS without the sidecar",
   description:
     "Running Certbot inside Docker Compose has real friction. Here are the alternatives that avoid it, and how to check any of them actually worked.",
+  alternates: { canonical: "/guides/certbot-alternative-docker" },
 };
 
 export default function CertbotAlternativeDockerGuide() {

@@ -33,6 +33,10 @@ export const metadata: Metadata = {
     template: "%s | SUN-DRAM Scanner",
   },
   description: "Free TLS and DNS scanner. Enter a hostname, get a graded report, share the link.",
+  // Default for the homepage and any route that doesn't set its own —
+  // every other route below overrides this with its own path so it isn't
+  // left pointing at "/".
+  alternates: { canonical: "/" },
 };
 
 export default function RootLayout({

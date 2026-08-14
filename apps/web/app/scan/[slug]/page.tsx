@@ -37,6 +37,7 @@ export async function generateMetadata({ params }: ScanResultPageProps): Promise
   return {
     title,
     description,
+    alternates: { canonical: `/scan/${slug}` },
     openGraph: { title, description },
     twitter: { card: "summary", title, description },
   };

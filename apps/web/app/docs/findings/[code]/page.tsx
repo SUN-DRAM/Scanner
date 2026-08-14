@@ -35,7 +35,10 @@ export async function generateMetadata({ params }: DocsFindingPageProps): Promis
   if (!code) return { title: "Finding not found" };
 
   const title = code.replaceAll("_", " ").toLowerCase();
-  return { title: `${title} — findings reference` };
+  return {
+    title: `${title} — findings reference`,
+    alternates: { canonical: `/docs/findings/${slug}` },
+  };
 }
 
 export default async function DocsFindingPage({ params }: DocsFindingPageProps) {

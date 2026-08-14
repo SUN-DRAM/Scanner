@@ -4,6 +4,7 @@ import Link from "next/link";
 export const metadata: Metadata = {
   title: "Guides",
   description: "Certificate lifetimes, renewal automation, and getting ready for March 2027.",
+  alternates: { canonical: "/guides" },
 };
 
 const GUIDES = [

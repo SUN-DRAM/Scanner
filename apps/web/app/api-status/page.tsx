@@ -7,6 +7,7 @@ import { formatDateTimeDisplay } from "@/lib/format";
 export const metadata: Metadata = {
   title: "API status",
   description: "Live status of the SUN-DRAM Scanner API.",
+  alternates: { canonical: "/api-status" },
 };
 
 const DEPENDENCY_LABEL: Record<string, string> = {

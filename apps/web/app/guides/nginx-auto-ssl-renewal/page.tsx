@@ -6,6 +6,7 @@ export const metadata: Metadata = {
   title: "Automatic SSL renewal for nginx — a working setup",
   description:
     "A working nginx auto-renewal setup with Certbot, the failure points that actually cause outages, and how to confirm it's really working.",
+  alternates: { canonical: "/guides/nginx-auto-ssl-renewal" },
 };
 
 export default function NginxAutoSslRenewalGuide() {

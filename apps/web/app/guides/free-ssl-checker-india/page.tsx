@@ -6,6 +6,7 @@ export const metadata: Metadata = {
   title: "Free SSL checker for Indian websites",
   description:
     "A free, no-signup SSL and DNS checker built for founders and agencies in India managing certificates ahead of the 2027 lifetime cut.",
+  alternates: { canonical: "/guides/free-ssl-checker-india" },
 };
 
 export default function FreeSslCheckerIndiaGuide() {
