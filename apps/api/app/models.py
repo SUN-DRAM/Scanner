@@ -121,6 +121,25 @@ class OrganisationRecord(Base):
     country: Mapped[str] = mapped_column(String(2), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     plan_code: Mapped[str] = mapped_column(String(20), nullable=False, server_default="free")
+    # Phase 2 Step 5 (contract v2.0's own log flagged these as this step's
+    # concern to add, not invented ahead of it). IANA zone name, "HH:MM"
+    # 24-hour local times, and DigestMode (§5) — every org gets a working
+    # default the day it's created, before anyone visits Step 7's settings
+    # page to change one.
+    timezone: Mapped[str] = mapped_column(
+        String(64), nullable=False, server_default="Asia/Kolkata"
+    )
+    quiet_hours_start: Mapped[str] = mapped_column(
+        String(5), nullable=False, server_default="21:00"
+    )
+    quiet_hours_end: Mapped[str] = mapped_column(String(5), nullable=False, server_default="08:00")
+    # "Default: digest on free, immediate on paid" (§Step 5) — every org is
+    # created on the free plan (app/otp.py), so "digest" is the one default
+    # this column ever needs until Step 6's billing can change plan_code.
+    digest_mode: Mapped[str] = mapped_column(String(16), nullable=False, server_default="digest")
+    # Not specified by the phase prompt ("a chosen hour" implies the org
+    # picks it — Step 7's settings page): defaults to 09:00 local.
+    digest_hour: Mapped[int] = mapped_column(Integer, nullable=False, server_default="9")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -258,13 +277,13 @@ class MonitoredHostnameRecord(Base):
 
 
 class AlertEventRecord(Base):
-    """Contract §6.11 `AlertEvent`. Phase 2 Step 4 is the first writer —
+    """Contract §6.11 `AlertEvent`. Phase 2 Step 4 was the first writer —
     app/monitors.py's scan_failure firing, once a monitor's retries are
-    exhausted — but not the only one: Step 5 builds the other four
-    `AlertType`s, dedup-on-`sent`-state, quiet hours, digest batching, and
+    exhausted. Step 5 (app/alerts.py) adds the other four `AlertType`s,
+    dedup-on-`sent`/`pending`-state, quiet hours, digest batching, and
     actual delivery on top of this same table, not a parallel one. No
     Pydantic schema exists yet (schemas.py/contract.ts) because nothing
-    serialises this to JSON until Step 5's `/app/alerts` dashboard reads
+    serialises this to JSON until Step 7's `/app/alerts` dashboard reads
     it — adding one now, ahead of that, is exactly the "generated but not
     yet defined" drift CONTRACT.md rule 9 exists to prevent."""
 
@@ -288,6 +307,12 @@ class AlertEventRecord(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     recipients: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default="[]")
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    # Phase 2 Step 5, not part of the JSON contract. "Retry 3x with backoff"
+    # (§Step 5) reuses the delivery cron's own 5-minute cadence as the
+    # backoff, the same pattern Step 4's scan retries already established —
+    # incremented on each failed send attempt, `state` becomes `failed`
+    # once this reaches 3 rather than retrying forever.
+    send_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -295,7 +320,42 @@ class AlertEventRecord(Base):
     __table_args__ = (
         Index("alert_events_dedupe_key_idx", "dedupe_key"),
         Index("alert_events_org_id_idx", "org_id"),
+        Index("alert_events_state_scheduled_for_idx", "state", "scheduled_for"),
     )
+
+
+class AlertRecipientRecord(Base):
+    """Contract §6.10 `AlertRecipient`. No management endpoint exists yet
+    (Step 7's `/app/alerts` settings page) — app/alerts.py resolves and
+    delivers against whatever rows exist here, falling back to every
+    `owner`/`admin` membership's email when an org has added none, so
+    alerts are never silently dropped just because nobody has visited that
+    settings page yet."""
+
+    __tablename__ = "alert_recipients"
+
+    recipient_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organisations.org_id"), nullable=False
+    )
+    # Null = org-wide (every monitor); non-null scopes to one monitor (§6.10).
+    monitor_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("monitored_hostnames.monitor_id")
+    )
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    verified: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    # Not part of the JSON contract's §6.10 shape (which only has
+    # `verified`) — a distinct concept: `verified` means "confirmed this
+    # address is real", `unsubscribed` means "opted out of alerts". A
+    # recipient can be both verified and unsubscribed.
+    unsubscribed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("alert_recipients_org_id_idx", "org_id"),)
 
 
 class DailyStatsRecord(Base):

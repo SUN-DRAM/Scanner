@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, PlainSerializer, field_validator
 
 from app.enums import (
     Currency,
+    DigestMode,
     DmarcPolicy,
     Grade,
     LifetimePhase,
@@ -403,6 +404,14 @@ class Organisation(ContractModel):
     country: str
     currency: Currency
     plan_code: PlanCode
+    # Phase 2 Step 5 (contract v2.0 flagged these as this step's own
+    # concern). timezone is an IANA zone name; quiet_hours_* are "HH:MM"
+    # 24-hour local times.
+    timezone: str
+    quiet_hours_start: str
+    quiet_hours_end: str
+    digest_mode: DigestMode
+    digest_hour: int
     created_at: UtcDatetime
 
 
@@ -584,3 +593,10 @@ class MonitorHistoryEntry(ContractModel):
     grade: Grade | None
     score: int | None
     scanned_at: UtcDatetime
+
+
+# --- 7.10 Alert unsubscribe (Phase 2 Step 5) ---
+
+
+class UnsubscribeResponse(ContractModel):
+    message: str

@@ -153,3 +153,8 @@ class InvoiceState(StrEnum):
     PAID = "paid"
     VOID = "void"
     UNCOLLECTIBLE = "uncollectible"
+
+
+class DigestMode(StrEnum):
+    IMMEDIATE = "immediate"
+    DIGEST = "digest"

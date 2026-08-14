@@ -53,6 +53,8 @@ export type OtpPurpose = "login" | "email_change";
 
 export type InvoiceState = "open" | "paid" | "void" | "uncollectible";
 
+export type DigestMode = "immediate" | "digest";
+
 // --- error envelope (contract §7.4) ---
 
 export type ErrorCode =
@@ -389,6 +391,13 @@ export interface Organisation {
   country: string;
   currency: Currency;
   plan_code: PlanCode;
+  // Phase 2 Step 5. timezone is an IANA zone name; quiet_hours_* are
+  // "HH:MM" 24-hour local times.
+  timezone: string;
+  quiet_hours_start: string;
+  quiet_hours_end: string;
+  digest_mode: DigestMode;
+  digest_hour: number;
   created_at: string;
 }
 
@@ -537,3 +546,11 @@ export interface MonitorHistoryEntry {
 // POST /api/v1/monitors/bulk -> MonitorBulkResponse (200)
 // POST /api/v1/monitors/{monitor_id}/scan -> ScanCreateResponse (202) | 404 NOT_FOUND | 429 RATE_LIMITED
 // GET /api/v1/monitors/{monitor_id}/history?page=&per_page= -> PaginatedList<MonitorHistoryEntry>
+
+// --- 7.10 Alert unsubscribe (Phase 2 Step 5) ---
+
+export interface UnsubscribeResponse {
+  message: string;
+}
+
+// GET /api/v1/alerts/unsubscribe/{recipient_id} -> UnsubscribeResponse (200) | 404 NOT_FOUND

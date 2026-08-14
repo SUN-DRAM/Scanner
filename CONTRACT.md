@@ -192,6 +192,7 @@ AlertState        = "pending" | "sent" | "failed" | "suppressed"
 MonitorState      = "active" | "paused" | "quota_blocked" | "verification_pending"
 OtpPurpose        = "login" | "email_change"
 InvoiceState      = "open" | "paid" | "void" | "uncollectible"   // Not specified by the phase prompt's §1.1 enum list — mirrors Stripe's own state set. Signed off by the human 2026-08-14 (see §14 v2.1).
+DigestMode        = "immediate" | "digest"   // Phase 2 Step 5. Not named by the phase prompt's §1.1 enum list — Organisation.digest_mode (§6.7) needs a closed set and "immediate or daily digest" (§Step 5) is exactly two values.
 ```
 
 `overall_grade` and every module `grade` use the `Grade` set. Grade colours are fixed in section 12.
@@ -471,11 +472,16 @@ No password field exists anywhere in this shape or the database — email OTP on
   "country": "IN",           // ISO 3166-1 alpha-2, set at signup, drives billing provider selection (§Step 6)
   "currency": "INR",         // Currency
   "plan_code": "free",       // PlanCode
+  "timezone": "Asia/Kolkata",       // IANA zone name (§Step 5). Default for every org, no setup endpoint exists yet (Step 7)
+  "quiet_hours_start": "21:00",     // "HH:MM", 24-hour, local to `timezone`
+  "quiet_hours_end": "08:00",       // wraps midnight when start > end, as it does by default
+  "digest_mode": "digest",          // DigestMode. "digest" for every org today — all orgs are created on the free plan (§Step 5: "digest on free, immediate on paid")
+  "digest_hour": 9,                 // 0-23, local to `timezone` — the hour a daily digest sends
   "created_at": "2026-08-09T10:14:03Z"
 }
 ```
 
-Created automatically as a personal org on first OTP login (§7.6). Per-org alert preferences (timezone, quiet-hours window, digest mode) are **not** in this shape yet — Step 5 will need a small follow-up amendment to add them when the alert engine is built; not invented here ahead of that need.
+Created automatically as a personal org on first OTP login (§7.6). The five alert-preference fields were added in Step 5 (v2.0's amendment note flagged them as this step's own concern, not invented ahead of it) — every org gets a working default the day it's created; no endpoint changes them yet (Step 7's `/app/alerts` settings page).
 
 ### 6.8 `Membership` (Phase 2)
 
@@ -525,6 +531,8 @@ Reuses §7.2 hostname normalisation and §10 safety guard unchanged — no paral
 }
 ```
 
+Backing table exists as of Step 5 (`alert_recipients`) and the alert engine (§7.10) resolves and delivers against whatever rows are in it, but no endpoint creates them yet — that's Step 7's `/app/alerts` settings page ("suggest a role address" is UI copy for that page, not backend logic). Until an org has added any, every `owner`/`admin` membership's email is used as a fallback, so alerts are never silently dropped for lack of a recipient.
+
 ### 6.11 `AlertEvent` (Phase 2)
 
 ```jsonc
@@ -543,6 +551,8 @@ Reuses §7.2 hostname normalisation and §10 safety guard unchanged — no paral
   "payload": {}               // object — template data for the email, shape is module/type-specific and not enumerated here
 }
 ```
+
+Backing table exists since Step 4 (`scan_failure` only); Step 5 (§7.10) is what actually moves `state` through `pending` → `sent`/`suppressed`/`failed` for every `AlertType`, and is the first thing that ever populates `recipients`. No Pydantic schema or endpoint exists yet — still true after Step 5, since nothing serialises this to JSON until Step 7's `/app/alerts` dashboard reads it.
 
 ### 6.12 `Subscription` (Phase 2)
 
@@ -836,7 +846,42 @@ GET /api/v1/monitors/{monitor_id}/history?page=1&per_page=25
 
 The scheduler itself (an arq cron job, every 5 minutes) has no HTTP surface — it claims due `active` monitors with `SELECT ... FOR UPDATE SKIP LOCKED`, reserves each one's `next_scan_at` immediately (jittered ±10% around the org's plan `scan_interval_hours`, `app/plans.py`) so a slow scan is never claimed twice, and enqueues a scan through the identical `run_scan_job` path a public or manual scan uses. A scheduler-enqueued scan is capped at `SCHEDULER_MAX_CONCURRENT_SCANS` (§4, default 3) concurrently in flight via a Redis semaphore — well under the worker's `max_jobs` of 10 — so a scheduled backlog structurally cannot starve interactive public or manual scans; they share no budget with it at all.
 
-A failed scan tied to a monitor (scheduled or manual) retries at 5 minutes, 30 minutes, then 2 hours (fixed by the phase prompt, not configurable) — the scheduler's own polling cadence is the retry mechanism, `next_scan_at` is simply set to the backoff time. After the third consecutive failure, retries stop and a `scan_failure` `AlertEvent` (§6.11) is recorded with `state: "pending"` — not part of the JSON contract yet (no endpoint returns it until Step 5's alert engine), a durable "this needs to notify someone" record for that step to pick up, not a delivered notification itself.
+A failed scan tied to a monitor (scheduled or manual) retries at 5 minutes, 30 minutes, then 2 hours (fixed by the phase prompt, not configurable) — the scheduler's own polling cadence is the retry mechanism, `next_scan_at` is simply set to the backoff time. After the third consecutive failure, retries stop and a `scan_failure` `AlertEvent` (§6.11) is recorded with `state: "pending"` — a durable "this needs to notify someone" record Step 5's alert engine (§7.10) picks up and delivers, same as every other `AlertType`.
+
+### 7.10 Alert engine (Phase 2 Step 5)
+
+| Method | Path | Purpose | Success |
+|---|---|---|---|
+| GET | `/api/v1/alerts/unsubscribe/{recipient_id}` | stop alerts to one recipient | 200 |
+
+```json
+GET /api/v1/alerts/unsubscribe/{recipient_id}
+-> 200 { "message": "You will no longer receive alert emails at this address." }
+   404 NOT_FOUND
+```
+
+Deliberately a `GET`, the one other exception (besides §7.5's `admin/stats`) to "every endpoint requires the session cookie where auth applies": this is the link an alert email's "Unsubscribe" line points at, so it must work from a plain click with no session and no JS.
+
+No other endpoint exists for this step — recipient management (`AlertRecipient`, §6.10) and reading alert history are Step 7's `/app/alerts` settings page. Everything else below is engine *behaviour*, not HTTP surface.
+
+**Triggers** — evaluated once per completed monitor-linked scan (`scanner/orchestrator.py`, before that scan's grade/certificate state overwrites the monitor's previous values):
+- `cert_expiry` at each of the org's plan's `alert_lead_days` (`app/plans.py` — `60/30/14/7/3/1` paid, `14/3` free)
+- `domain_expiry` at `45` and `14` days — fixed, not plan-dependent
+- `grade_regression` when the grade drops at least one band versus the previous completed scan
+- `new_critical_finding` when a `critical`/`high` finding's code appears that wasn't present in the previous completed scan (one `AlertEvent` per newly-appeared code)
+- `scan_failure` — §7.9's concern, reusing this same firing/delivery path
+
+Each is a **crossing** check (current value newly qualifies, the previous scan's didn't), not "still qualifies" — a certificate holding steady at 5 days across ten flapping re-scans crosses the `7`-day threshold once, not ten times. Renewing the certificate (or the domain, or recovering the grade) resets what "previous" means for the next comparison, so a later, genuinely new approach to the same threshold fires again — dedupe (below) is the second, independent guard against duplicates within one still-open episode.
+
+**Deduplication.** Every fired alert's `dedupe_key` is `{monitor_id}:{type}:{threshold}` (§6.11) — `threshold` is the lead day for `cert_expiry`/`domain_expiry`, the grade landed on for `grade_regression`, the finding code for `new_critical_finding`, or the literal string `exhausted` for `scan_failure` (§7.9). Before creating a row, the engine checks for an existing one with the same key in `pending` or `sent` state and skips if found — "a key already in sent state never sends again."
+
+**Quiet hours.** Per-org `timezone`/`quiet_hours_start`/`quiet_hours_end` (§6.7, defaults `Asia/Kolkata`/`21:00`/`08:00`). A non-urgent alert's `scheduled_for` is pushed to the window's local end time (converted back to UTC) if it would otherwise fall inside the window. `cert_expiry` at `≤3` days and `scan_failure` are **urgent**: `scheduled_for` is always `now`, ignoring quiet hours and digest mode both.
+
+**Digest mode.** `Organisation.digest_mode`/`digest_hour` (§6.7). A non-urgent alert on a `"digest"` org is deferred again, past quiet hours, to the next local occurrence of `digest_hour`. Delivery batches every `AlertEvent` due for the same `(org, monitor)` at the same tick into one email — the mechanism is entirely `scheduled_for`: an urgent alert's `now` almost never coincides with anything else, so it ships alone; a digest org's non-urgent alerts pile up at the same future slot and all become due, and get sent, together.
+
+**Delivery.** A second arq cron job (`deliver_alerts_tick`, same 5-minute cadence as §7.9's scheduler tick, `app/worker.py`) sends everything `pending` and due. Recipients: every `AlertRecipient` (§6.10) scoped to the org (`monitor_id: null`) or that specific monitor, minus anyone unsubscribed; falling back to every `owner`/`admin` membership's email when the org has added no recipients at all. No recipients found → the batch's events move straight to `state: "suppressed"`, not `sent`, not retried. `Retry 3x with backoff` reuses the delivery cron's own cadence as the backoff (the same pattern §7.9 already established for scan retries) — a failed send leaves `state: "pending"` and increments an internal attempt counter; the 3rd failure sets `state: "failed"` and logs at `ERROR`, which Sentry (Gate C) already captures — "alert us, not the customer."
+
+**Templates.** Plain text, sentence case, no marketing chrome. A single alert's subject is `{hostname} — {condition}`; a digest batch's subject names the count (`"3 alerts across 2 hostname(s)"`) with one line per alert in the body — actionable from a phone notification without opening the mail. Every recipient resolved from a real `AlertRecipient` row gets a personalised unsubscribe link in their copy; the `owner`/`admin` membership fallback has nothing to unsubscribe from, so gets none.
 
 ---
 
@@ -1098,3 +1143,4 @@ A phase is complete only when all of these are true:
 | 2.1 | 2026-08-14 | Phase 2 Step 2 implementation: OTP auth, users/orgs/memberships, session cookie, role enforcement (`docs/PHASE_2_PROMPT.md` Step 2). Two necessary additions discovered while building it, not anticipated by v2.0, flagged rather than silently assumed: new §4 vars `RESEND_API_KEY`/`EMAIL_FROM_ADDRESS` (OTP delivery needs a real provider now, before Step 5's own `app/notify/email.py` was going to exist — that module is built early, in Step 2, for exactly this reason) and new §7.4 code `NOT_FOUND` (404) — §7.6's "cross-org id returns 404" rule had nothing to return, since `SCAN_NOT_FOUND` is scan-specific; used from the new §7.7 member endpoints onward, and will cover monitors in Step 3. New §7.7: concrete request/response shapes for every §Step 2 endpoint, `MembershipWithEmail` (§6.8 `Membership` plus `email` — a member list is unusable without it, not a new top-level shape). Member invite is idempotent (re-inviting an existing member updates their role, `200`, rather than a conflict `409` — no separate role-change endpoint exists yet). Removing an org's last `owner` is refused (`403`) rather than left possible. `PATCH /api/v1/orgs/current` scoped to `name` only — `country`/`currency` stay locked until Step 6's "changeable only before the first subscription" rule has somewhere to live. Human sign-off received on all four items v2.0 proposed pending confirmation: `InvoiceState` (`"open" \| "paid" \| "void" \| "uncollectible"`), `SESSION_SECRET` as the env var name/mechanism, `sd_session` as the cookie name, and `100` as the pagination `per_page` ceiling — none of these values changed, only their status from proposed to confirmed. |
 | 2.2 | 2026-08-14 | Phase 2 Step 3 implementation: monitored hostnames (`docs/PHASE_2_PROMPT.md` Step 3). New §7.8: the seven `/api/v1/monitors...` endpoints, closing the `QUOTA_EXCEEDED` `details` shape v2.0 deliberately deferred (`{"current", "limit", "plan_code", "upgrade_to"}`, the last read from `app/plans.py`'s purchasable-plan ordering, never hardcoded). `RATE_LIMITED` (§7.4) extended, not duplicated, for the new one-manual-rescan-per-monitor-per-10-minutes limit. Two scoping decisions not specified by the phase prompt, made and documented rather than left implicit: `DUPLICATE_HOSTNAME` keys on `(hostname, port)` together, not hostname alone (port 443 and 8443 are different monitoring targets, same as §10's own allowlist treats them); quota accounting counts `active`/`paused`/`verification_pending` monitors only, so a `quota_blocked` monitor doesn't count against the very quota it's blocked by. `POST /api/v1/monitors` and `/monitors/bulk` reuse §7.2/§10 exactly as `POST /api/v1/scans` does — an unresolvable hostname is still accepted (not an HTTP error, same treatment as a public scan), a `BLOCKED_TARGET` address is rejected synchronously. Internal-only additions, not part of the JSON contract: `monitored_hostnames` table, a nullable `scans.monitor_id` FK (set when a scan is enqueued on a monitor's behalf, read back by `app/monitors.py` when that scan completes to update the monitor's denormalised `last_grade`/`last_score`/`last_scanned_at` and the certificate-expiry timestamp `days_until_expiry` is derived from). |
 | 2.3 | 2026-08-14 | Phase 2 Step 4 implementation: scheduler (`docs/PHASE_2_PROMPT.md` Step 4). New §7.9: `GET /monitors/{monitor_id}/history` (`MonitorHistoryEntry`, a thin projection of `scans.monitor_id` rows — not a new §6 top-level shape) and the scheduler's own behaviour, which has no HTTP surface of its own. New §4 var `SCHEDULER_MAX_CONCURRENT_SCANS` (default `3`) — the Redis-semaphore concurrency cap `Step 4` asks for, deliberately well under `worker.py`'s `max_jobs` of `10` so scheduled scans structurally cannot starve public/manual ones (they share no budget with it at all, rather than competing for one via priority). Retry backoff (5m/30m/2h, fixed by the phase prompt) and the post-exhaustion `scan_failure` alert reuse the scheduler's own 5-minute polling cadence as the retry mechanism — no separate retry job. Internal-only additions, not part of the JSON contract: `monitored_hostnames.consecutive_failures` (drives the retry/alert threshold, reset to 0 on the next successful scan) and an `alert_events` table backing `AlertEvent` (§6.11) — Step 4 only *fires* a `scan_failure` row into it (`state: "pending"`); no Pydantic schema or endpoint exists for it yet, since nothing serialises it to JSON until Step 5's alert engine reads it, and adding one ahead of that would be exactly the "generated but not yet defined" drift rule 9 exists to prevent. `app/scheduler.py`'s scan-record creation was extracted into `app/monitors.py`'s `create_monitor_scan_record`, shared with Step 3's manual re-scan (`create_manual_rescan`) — one place a monitor-linked `scans` row is created, not two. |
+| 2.4 | 2026-08-14 | Phase 2 Step 5 implementation: alert engine (`docs/PHASE_2_PROMPT.md` Step 5). New §5 enum `DigestMode` (not named by the phase prompt's enum list — `Organisation.digest_mode` needs a closed set for "immediate or daily digest"). §6.7 `Organisation` gains the five alert-preference fields v2.0's amendment note flagged as this step's own concern (`timezone`, `quiet_hours_start`, `quiet_hours_end`, `digest_mode`, `digest_hour`) — every org gets a working default the day it's created. New §7.10: the one HTTP endpoint this step adds (`GET /alerts/unsubscribe/{recipient_id}`, deliberately a bare `GET` so an email link works with no session), and the engine's behaviour — triggers, dedupe, quiet hours, digest batching, delivery/retry. `alert_recipients` table exists (backing §6.10 `AlertRecipient`) but has no management endpoint yet; falls back to org owners/admins' emails until Step 7 ships one. `AlertEvent` (§6.11) still has no Pydantic schema — Step 5 is a *writer* of that table (alongside Step 4), not a reader; nothing serialises it to JSON until Step 7's dashboard. One interpretation beyond the phase prompt's literal text, made and documented rather than left to chance: dedupe_key's `{monitor_id}:{type}:{threshold}` shape has no time or certificate-instance component, so a purely literal "sent state never sends again" would silently suppress a genuinely new alert forever after the first one — after a renewal, a domain re-registration, or a grade recovery-then-relapse. Resolved by gating alert *creation* on a crossing check (current value newly qualifies, the previous scan's didn't) rather than "still qualifies", so the dedupe guard only ever has to catch duplicates within one still-open episode, which is what "a certificate sitting at 7 days across a flapping scan must produce exactly one email" actually asks for. |

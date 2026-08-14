@@ -16,11 +16,12 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.alerts import evaluate_and_fire_alerts
 from app.config import get_settings
 from app.enums import ModuleName, ScanStatus, Severity
 from app.errors import ApiError, ApiException, ErrorCode
 from app.grading import ModuleScoreInput, grade_scan
-from app.models import ScanRecord
+from app.models import MonitoredHostnameRecord, OrganisationRecord, ScanRecord
 from app.monitors import record_scan_failure, update_monitor_after_scan
 from app.safety import HostnameResolutionError, resolve_and_validate
 from app.scanner import (
@@ -272,16 +273,26 @@ async def _run_and_persist(
     await session.commit()
 
     # Phase 2 Step 3: a scan enqueued on a MonitoredHostname's behalf
-    # (record.monitor_id set — app/monitors.py's create_manual_rescan today,
-    # Step 4's scheduler later) updates that monitor's denormalised
-    # last_grade/last_score/last_scanned_at here, the one place a scan
-    # result is ever persisted as completed. Never on a failed scan (see the
-    # early-return branches above) — a transient failure must not overwrite
-    # the monitor's last known-good grade with nothing.
+    # (record.monitor_id set — app/monitors.py's create_manual_rescan or
+    # app/scheduler.py) updates that monitor's denormalised last_grade/
+    # last_score/last_scanned_at here, the one place a scan result is ever
+    # persisted as completed. Never on a failed scan (see the early-return
+    # branches above) — a transient failure must not overwrite the
+    # monitor's last known-good grade with nothing.
     if record.monitor_id is not None:
         cert_not_after = None
         if modules.certificate is not None and modules.certificate.data is not None:
             cert_not_after = modules.certificate.data.not_after
+
+        # Step 5's alert engine compares against the monitor's *previous*
+        # grade/certificate state, so it must run before update_monitor_
+        # after_scan below overwrites both.
+        monitor = await session.get(MonitoredHostnameRecord, record.monitor_id)
+        if monitor is not None:
+            org = await session.get(OrganisationRecord, monitor.org_id)
+            if org is not None:
+                await evaluate_and_fire_alerts(session, org, monitor, scan)
+
         await update_monitor_after_scan(
             session,
             record,

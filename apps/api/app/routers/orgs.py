@@ -42,6 +42,11 @@ def _org_to_schema(org: OrganisationRecord) -> Organisation:
         country=org.country,
         currency=org.currency,  # type: ignore[arg-type]
         plan_code=org.plan_code,  # type: ignore[arg-type]
+        timezone=org.timezone,
+        quiet_hours_start=org.quiet_hours_start,
+        quiet_hours_end=org.quiet_hours_end,
+        digest_mode=org.digest_mode,  # type: ignore[arg-type]
+        digest_hour=org.digest_hour,
         created_at=org.created_at,
     )
 

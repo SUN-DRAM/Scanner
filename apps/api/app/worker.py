@@ -15,9 +15,11 @@ from typing import Any
 from arq import cron
 from arq.connections import RedisSettings
 
+from app.alerts import deliver_pending_alerts
 from app.config import get_settings
 from app.db import get_sessionmaker
 from app.logging_config import configure_logging
+from app.notify.email import get_email_sender
 from app.observability import init_sentry
 from app.scanner.orchestrator import run_scan
 from app.scheduler import run_scheduler_tick
@@ -26,6 +28,8 @@ _settings = get_settings()
 configure_logging(_settings)
 init_sentry(_settings)
 
+_EVERY_FIVE_MINUTES = set(range(0, 60, 5))
+
 
 async def run_scan_job(_ctx: dict[str, Any], scan_id: str) -> None:
     sessionmaker = get_sessionmaker()
@@ -33,12 +37,32 @@ async def run_scan_job(_ctx: dict[str, Any], scan_id: str) -> None:
         await run_scan(session, scan_id)
 
 
+async def deliver_alerts_tick(_ctx: dict[str, Any]) -> None:
+    """§Step 5: alert delivery, on the same 5-minute cadence as the
+    scheduler tick — a distinct cron job (not folded into
+    run_scheduler_tick) so scanning and alerting stay two concerns, not
+    one function doing both."""
+    sessionmaker = get_sessionmaker()
+    email_sender = get_email_sender(get_settings())
+    async with sessionmaker() as session:
+        await deliver_pending_alerts(session, email_sender)
+
+
 class WorkerSettings:
     functions = (run_scan_job,)
     # §Step 4: "An arq cron job every 5 minutes claiming due monitors and
     # enqueuing scans." run_scheduler_tick (app/scheduler.py) does the
-    # claiming; this only fires it on the clock.
-    cron_jobs = [cron(run_scheduler_tick, minute=set(range(0, 60, 5)))]
+    # claiming; this only fires it on the clock. deliver_alerts_tick
+    # (§Step 5) is the same cadence, a separate job.
+    _scheduler_cron_job = cron(run_scheduler_tick, minute=_EVERY_FIVE_MINUTES)
+    # mypy flags this second cron() call but not the first, despite
+    # deliver_alerts_tick and run_scheduler_tick having the exact same
+    # `async def f(ctx: dict[str, Any]) -> None` shape (confirmed by
+    # isolating both against arq.typing.WorkerCoroutine directly) — a
+    # false positive in how mypy resolves arq's stubs for this specific
+    # pattern, not a real signature mismatch.
+    _alerts_cron_job = cron(deliver_alerts_tick, minute=_EVERY_FIVE_MINUTES)  # type: ignore[arg-type]
+    cron_jobs = [_scheduler_cron_job, _alerts_cron_job]
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     # Comfortably above SCAN_TIMEOUT_SECONDS so the orchestrator's own
     # whole-scan budget (§10 rule 5) is always what actually cuts a stuck
