@@ -60,3 +60,21 @@ async def enforce_scan_rate_limits(
     hostname_key = f"ratelimit:hostname:{hash_for_bucket(hostname)}"
     await _check_and_record(redis, ip_key, per_ip_per_hour, window_seconds)
     await _check_and_record(redis, hostname_key, per_hostname_per_hour, window_seconds)
+
+
+async def enforce_otp_request_rate_limits(
+    redis: Redis,
+    *,
+    client_ip: str,
+    email: str,
+    per_email_per_hour: int = 3,
+    per_ip_per_hour: int = 10,
+    window_seconds: int = WINDOW_SECONDS,
+) -> None:
+    """Contract §7.6: 3 OTP requests per email per hour, 10 per IP per hour.
+    Same sliding-window mechanism as `enforce_scan_rate_limits`, a distinct
+    key prefix so the two buckets never collide."""
+    email_key = f"ratelimit:otp:email:{hash_for_bucket(email)}"
+    ip_key = f"ratelimit:otp:ip:{hash_for_bucket(client_ip)}"
+    await _check_and_record(redis, email_key, per_email_per_hour, window_seconds)
+    await _check_and_record(redis, ip_key, per_ip_per_hour, window_seconds)

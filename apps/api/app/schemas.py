@@ -14,15 +14,18 @@ from typing import Annotated, Any, Generic, Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, PlainSerializer, field_validator
 
 from app.enums import (
+    Currency,
     DmarcPolicy,
     Grade,
     LifetimePhase,
     ModuleName,
     ModuleStatus,
+    PlanCode,
     ReadinessVerdict,
     ScanStatus,
     Severity,
     SpfPolicy,
+    UserRole,
 )
 from app.errors import ApiError
 
@@ -380,3 +383,120 @@ class MetaDeadlines(ContractModel):
     generated_at: UtcDatetime
     phases: list[PhaseInfo]
     next_deadline: NextDeadlineInfo
+
+
+# --- 6.6-6.13 Phase 2 data shapes ---
+
+
+class User(ContractModel):
+    user_id: str
+    email: str
+    email_verified: bool
+    created_at: UtcDatetime
+    last_login_at: UtcDatetime | None
+
+
+class Organisation(ContractModel):
+    org_id: str
+    name: str
+    country: str
+    currency: Currency
+    plan_code: PlanCode
+    created_at: UtcDatetime
+
+
+class Membership(ContractModel):
+    org_id: str
+    user_id: str
+    role: UserRole
+    invited_by: str | None
+    joined_at: UtcDatetime
+
+
+class MembershipWithEmail(Membership):
+    """Membership (§6.8) plus the member's email — a member list without it
+    isn't usable in the dashboard (§Step 7). Not a separate contract shape."""
+
+    email: str
+
+
+ListItemT = TypeVar("ListItemT", bound=BaseModel)
+
+
+class PaginatedList(ContractModel, Generic[ListItemT]):
+    """§6.14. `per_page` max is 100 — enforced by each router, not here."""
+
+    items: list[ListItemT]
+    page: int
+    per_page: int
+    total: int
+    has_more: bool
+
+
+# --- 7.7 Auth & organisation endpoints (Phase 2 Step 2) ---
+
+
+class OtpRequestRequest(ContractModel):
+    email: str
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str) -> str:
+        value = value.strip()
+        if not _EMAIL_PATTERN.match(value):
+            raise ValueError("Not a valid email address.")
+        return value
+
+
+class OtpRequestResponse(ContractModel):
+    message: str
+
+
+class OtpVerifyRequest(ContractModel):
+    email: str
+    code: str
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str) -> str:
+        value = value.strip()
+        if not _EMAIL_PATTERN.match(value):
+            raise ValueError("Not a valid email address.")
+        return value
+
+    @field_validator("code")
+    @classmethod
+    def _validate_code(cls, value: str) -> str:
+        value = value.strip()
+        if not re.fullmatch(r"\d{6}", value):
+            raise ValueError("Code must be 6 digits.")
+        return value
+
+
+class LogoutResponse(ContractModel):
+    message: str
+
+
+class OrgUpdateRequest(ContractModel):
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Name must not be empty.")
+        return value
+
+
+class MemberInviteRequest(ContractModel):
+    email: str
+    role: UserRole
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str) -> str:
+        value = value.strip()
+        if not _EMAIL_PATTERN.match(value):
+            raise ValueError("Not a valid email address.")
+        return value

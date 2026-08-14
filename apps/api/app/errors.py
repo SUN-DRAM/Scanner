@@ -32,6 +32,22 @@ class ErrorCode(StrEnum):
     SCAN_FAILED = "SCAN_FAILED"
     UPSTREAM_TIMEOUT = "UPSTREAM_TIMEOUT"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    # --- Phase 2 additions ---
+    UNAUTHENTICATED = "UNAUTHENTICATED"
+    FORBIDDEN = "FORBIDDEN"
+    OTP_INVALID = "OTP_INVALID"
+    OTP_EXPIRED = "OTP_EXPIRED"
+    OTP_RATE_LIMITED = "OTP_RATE_LIMITED"
+    QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
+    PLAN_REQUIRED = "PLAN_REQUIRED"
+    DUPLICATE_HOSTNAME = "DUPLICATE_HOSTNAME"
+    # CONTRACT GAP: not named by CONTRACT.md v2.0 — §7.7's cross-org-id rule
+    # ("a cross-org resource id returns 404, never 403") needs a generic
+    # not-found code for entities other than scans, which SCAN_NOT_FOUND
+    # can't honestly describe. Added here for orgs/current/members
+    # (Step 2) and flagged the same way SESSION_SECRET was: proposed out of
+    # necessity, not silently assumed.
+    NOT_FOUND = "NOT_FOUND"
 
 
 ERROR_CODE_HTTP_STATUS: dict[ErrorCode, int] = {
@@ -44,6 +60,15 @@ ERROR_CODE_HTTP_STATUS: dict[ErrorCode, int] = {
     # Scan.error with the Scan response itself returned as 200.
     ErrorCode.UPSTREAM_TIMEOUT: status.HTTP_504_GATEWAY_TIMEOUT,
     ErrorCode.INTERNAL_ERROR: status.HTTP_500_INTERNAL_SERVER_ERROR,
+    ErrorCode.UNAUTHENTICATED: status.HTTP_401_UNAUTHORIZED,
+    ErrorCode.FORBIDDEN: status.HTTP_403_FORBIDDEN,
+    ErrorCode.OTP_INVALID: status.HTTP_400_BAD_REQUEST,
+    ErrorCode.OTP_EXPIRED: status.HTTP_400_BAD_REQUEST,
+    ErrorCode.OTP_RATE_LIMITED: status.HTTP_429_TOO_MANY_REQUESTS,
+    ErrorCode.QUOTA_EXCEEDED: status.HTTP_402_PAYMENT_REQUIRED,
+    ErrorCode.PLAN_REQUIRED: status.HTTP_402_PAYMENT_REQUIRED,
+    ErrorCode.DUPLICATE_HOSTNAME: status.HTTP_409_CONFLICT,
+    ErrorCode.NOT_FOUND: status.HTTP_404_NOT_FOUND,
 }
 
 

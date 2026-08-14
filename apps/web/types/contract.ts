@@ -26,6 +26,33 @@ export type SpfPolicy = "none" | "neutral" | "softfail" | "fail" | "absent";
 
 export type DmarcPolicy = "none" | "quarantine" | "reject" | "absent";
 
+// --- Phase 2 additions (contract v2.0) ---
+
+export type UserRole = "owner" | "admin" | "member";
+
+export type PlanCode = "free" | "watch" | "watch_pro" | "secure" | "compliance";
+
+export type SubscriptionState = "trialing" | "active" | "past_due" | "cancelled" | "expired";
+
+export type BillingProvider = "razorpay" | "stripe";
+
+export type BillingInterval = "monthly" | "annual";
+
+export type Currency = "INR" | "USD";
+
+export type AlertType =
+  "cert_expiry" | "domain_expiry" | "grade_regression" | "scan_failure" | "new_critical_finding";
+
+export type AlertChannel = "email";
+
+export type AlertState = "pending" | "sent" | "failed" | "suppressed";
+
+export type MonitorState = "active" | "paused" | "quota_blocked" | "verification_pending";
+
+export type OtpPurpose = "login" | "email_change";
+
+export type InvoiceState = "open" | "paid" | "void" | "uncollectible";
+
 // --- error envelope (contract §7.4) ---
 
 export type ErrorCode =
@@ -345,3 +372,82 @@ export interface MetaDeadlines {
   phases: PhaseInfo[];
   next_deadline: NextDeadlineInfo;
 }
+
+// --- 6.6-6.13 Phase 2 data shapes ---
+
+export interface User {
+  user_id: string;
+  email: string;
+  email_verified: boolean;
+  created_at: string;
+  last_login_at: string | null;
+}
+
+export interface Organisation {
+  org_id: string;
+  name: string;
+  country: string;
+  currency: Currency;
+  plan_code: PlanCode;
+  created_at: string;
+}
+
+export interface Membership {
+  org_id: string;
+  user_id: string;
+  role: UserRole;
+  invited_by: string | null;
+  joined_at: string;
+}
+
+// Enriched beyond the bare §6.8 Membership shape with the member's email —
+// a member list without it isn't usable in the dashboard (§Step 7). Not a
+// separate contract shape, just Membership + one field.
+export interface MembershipWithEmail extends Membership {
+  email: string;
+}
+
+// --- 6.14 Paginated list envelope ---
+
+export interface PaginatedList<T> {
+  items: T[];
+  page: number;
+  per_page: number;
+  total: number;
+  has_more: boolean;
+}
+
+// --- 7.7 Auth & organisation endpoints (Phase 2 Step 2) ---
+
+export interface OtpRequestRequest {
+  email: string;
+}
+
+export interface OtpRequestResponse {
+  message: string;
+}
+
+export interface OtpVerifyRequest {
+  email: string;
+  code: string;
+}
+
+// POST /api/v1/auth/otp/verify -> User (200), sets the sd_session cookie.
+// POST /api/v1/auth/logout -> { "message": string } (200), clears it.
+// GET /api/v1/auth/me -> User (200) | 401 UNAUTHENTICATED.
+
+export interface OrgUpdateRequest {
+  name: string;
+}
+
+// GET /api/v1/orgs/current -> Organisation
+// PATCH /api/v1/orgs/current -> Organisation (OrgUpdateRequest body; name only — see CONTRACT.md §7.7)
+// GET /api/v1/orgs/current/members -> PaginatedList<MembershipWithEmail>
+
+export interface MemberInviteRequest {
+  email: string;
+  role: UserRole;
+}
+
+// POST /api/v1/orgs/current/members -> MembershipWithEmail (201)
+// DELETE /api/v1/orgs/current/members/{user_id} -> 204 No Content

@@ -45,6 +45,20 @@ class Settings(BaseSettings):
     # Gate C. Empty by default: no DSN means Sentry is never initialised —
     # error tracking is opt-in, never a silent default data destination.
     sentry_dsn: str = Field(default="", alias="SENTRY_DSN")
+    # Phase 2 §7.6. Signs the sd_session cookie. No default — an empty
+    # secret would make every session forgeable, so app.sessions refuses to
+    # start signing with it (see app/sessions.py) rather than silently
+    # falling back to something guessable.
+    session_secret: str = Field(default="", alias="SESSION_SECRET")
+    # Phase 2 Step 2, CONTRACT GAP: not named by CONTRACT.md v2.0 — the
+    # phase prompt's Step 1 didn't anticipate that OTP delivery (Step 2)
+    # needs a real email provider before Step 5's own app/notify/email.py
+    # is built. Added here out of necessity, same treatment SESSION_SECRET
+    # already got: flagged, not silently invented. Empty by default —
+    # app.notify.email falls back to logging the email instead of sending
+    # it, the same "empty = opt-in" pattern as SENTRY_DSN/ADMIN_TOKEN.
+    resend_api_key: str = Field(default="", alias="RESEND_API_KEY")
+    email_from_address: str = Field(default="", alias="EMAIL_FROM_ADDRESS")
 
     @field_validator("cors_origins")
     @classmethod

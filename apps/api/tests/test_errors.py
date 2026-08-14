@@ -38,15 +38,26 @@ ALL_ERROR_CODES: tuple[ErrorCode, ...] = (
     ErrorCode.SCAN_FAILED,
     ErrorCode.UPSTREAM_TIMEOUT,
     ErrorCode.INTERNAL_ERROR,
+    # --- Phase 2 additions (contract v2.0/§7.7) ---
+    ErrorCode.UNAUTHENTICATED,
+    ErrorCode.FORBIDDEN,
+    ErrorCode.OTP_INVALID,
+    ErrorCode.OTP_EXPIRED,
+    ErrorCode.OTP_RATE_LIMITED,
+    ErrorCode.QUOTA_EXCEEDED,
+    ErrorCode.PLAN_REQUIRED,
+    ErrorCode.DUPLICATE_HOSTNAME,
+    ErrorCode.NOT_FOUND,
 )
 
 
 def test_all_error_codes_constant_matches_the_closed_set() -> None:
-    # Contract §7.4's table has exactly these 8 rows — if a code is ever
-    # added or removed there, this constant (and the parametrized test
-    # below) must be updated in the same session.
+    # Contract §7.4's table has exactly these 17 rows (8 from Phase 1, 9
+    # added in Phase 2) — if a code is ever added or removed there, this
+    # constant (and the parametrized test below) must be updated in the
+    # same session.
     assert set(ALL_ERROR_CODES) == set(ErrorCode)
-    assert len(ALL_ERROR_CODES) == 8
+    assert len(ALL_ERROR_CODES) == 17
 
 
 @pytest.mark.parametrize("code", ALL_ERROR_CODES)

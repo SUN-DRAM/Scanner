@@ -20,7 +20,7 @@ from app.errors import REQUEST_ID_HEADER, register_exception_handlers
 from app.logging_config import configure_logging
 from app.observability import init_sentry
 from app.redis_client import close_arq_pool
-from app.routers import admin, health, meta, scans, waitlist
+from app.routers import admin, auth, health, meta, orgs, scans, waitlist
 
 logger = logging.getLogger("app")
 
@@ -47,8 +47,13 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,
-        allow_credentials=False,
-        allow_methods=["GET", "POST"],
+        # Phase 2 §7.6: the session cookie only crosses origins (dev: web on
+        # :3000, api on :8000) if the browser is told it may — credentialed
+        # CORS requires this on the server AND an explicit origin list, never
+        # "*" (browsers refuse the combination), which cors_origins_list
+        # (§4) already guarantees.
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["*"],
         expose_headers=[REQUEST_ID_HEADER],
     )
@@ -82,6 +87,8 @@ def create_app() -> FastAPI:
     app.include_router(meta.router, prefix="/api/v1")
     app.include_router(waitlist.router, prefix="/api/v1")
     app.include_router(admin.router, prefix="/api/v1")
+    app.include_router(auth.router, prefix="/api/v1")
+    app.include_router(orgs.router, prefix="/api/v1")
 
     return app
 

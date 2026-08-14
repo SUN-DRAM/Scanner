@@ -149,7 +149,9 @@ RATE_LIMIT_PER_HOSTNAME_PER_HOUR=6
 PUBLIC_BASE_URL=http://localhost:3000
 ADMIN_TOKEN=                        # Gate B: gates GET /api/v1/admin/stats. Empty = endpoint always 403.
 SENTRY_DSN=                         # Gate C: error tracking (api + worker). Empty = Sentry never initialised.
-SESSION_SECRET=                     # Phase 2 §7.6: signs the session cookie. Not named by the phase prompt — proposed here, flag if a different name/mechanism is wanted.
+SESSION_SECRET=                     # Phase 2 §7.6: signs the session cookie. Not named by the phase prompt — name/mechanism signed off by the human 2026-08-14 (see §14 v2.1).
+RESEND_API_KEY=                     # Phase 2 Step 2. CONTRACT GAP — see amendment 2.1: OTP delivery needs a real provider before Step 5's own app/notify/email.py is built. Empty = OTP codes are logged, not emailed.
+EMAIL_FROM_ADDRESS=                 # Phase 2 Step 2. Paired with RESEND_API_KEY above; both required to actually send.
 
 # --- web ---
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
@@ -188,7 +190,7 @@ AlertChannel      = "email"                 // single-value today so Phase 3 can
 AlertState        = "pending" | "sent" | "failed" | "suppressed"
 MonitorState      = "active" | "paused" | "quota_blocked" | "verification_pending"
 OtpPurpose        = "login" | "email_change"
-InvoiceState      = "open" | "paid" | "void" | "uncollectible"   // CONTRACT GAP: not specified by the phase prompt's §1.1 enum list — Invoice (§6.9) needs a closed state set and this is a reasonable default (mirrors Stripe's own), but it needs the human's sign-off, not an assumption baked in silently.
+InvoiceState      = "open" | "paid" | "void" | "uncollectible"   // Not specified by the phase prompt's §1.1 enum list — mirrors Stripe's own state set. Signed off by the human 2026-08-14 (see §14 v2.1).
 ```
 
 `overall_grade` and every module `grade` use the `Grade` set. Grade colours are fixed in section 12.
@@ -568,7 +570,7 @@ Reuses §7.2 hostname normalisation and §10 safety guard unchanged — no paral
   "number": "INV-2026-000123",
   "amount_minor": 99900,     // integer, minor units (paise/cents) — NEVER a float, never a formatted string
   "currency": "INR",         // Currency
-  "state": "paid",           // InvoiceState — CONTRACT GAP, see §5's InvoiceState note
+  "state": "paid",           // InvoiceState (§5)
   "issued_at": "2026-08-09T10:14:03Z",
   "paid_at": "2026-08-09T10:14:03Z",   // nullable
   "pdf_url": null,           // nullable string
@@ -585,7 +587,7 @@ Reuses §7.2 hostname normalisation and §10 safety guard unchanged — no paral
 { "items": [], "page": 1, "per_page": 25, "total": 137, "has_more": true }
 ```
 
-`page` defaults to `1`, `per_page` defaults to `25`. Maximum `per_page` is `100` — not specified by the phase prompt, proposed here as a sensible ceiling, flag if a different cap is wanted.
+`page` defaults to `1`, `per_page` defaults to `25`. Maximum `per_page` is `100` — not specified by the phase prompt, signed off by the human 2026-08-14 (see §14 v2.1).
 
 ---
 
@@ -676,6 +678,7 @@ Closed set of error codes and their HTTP statuses:
 | `QUOTA_EXCEEDED` | 402 | monitored-hostname quota hit for the org's plan (Phase 2) |
 | `PLAN_REQUIRED` | 402 | action needs a plan the org doesn't have (Phase 2) |
 | `DUPLICATE_HOSTNAME` | 409 | hostname already monitored in this org (Phase 2) |
+| `NOT_FOUND` | 404 | generic entity-not-found for anything other than a scan (Phase 2). CONTRACT GAP — see amendment 2.1: §7.6's "cross-org id returns 404" rule needs a code that isn't `SCAN_NOT_FOUND`; used from Step 2 onward (org members, later monitors) |
 
 A hostname that simply doesn't resolve is **not** an HTTP error. It is a `Scan` with `status: "failed"` and `error.code: "SCAN_FAILED"`, so the user still gets a shareable page.
 
@@ -701,12 +704,57 @@ Response `200`:
 
 Email OTP only. No passwords, no OAuth — nothing to hash, nothing to breach, no password-reset flow to build.
 
-- Session token in a cookie: `httpOnly`, `Secure`, `SameSite=Lax`. Never in `localStorage`/`sessionStorage` — already forbidden by this contract's stack rules, and this is why. Cookie name `sd_session` — not specified by the phase prompt, proposed here, flag if a different name is wanted. Signed with `SESSION_SECRET` (§4).
+- Session token in a cookie: `httpOnly`, `Secure`, `SameSite=Lax`. Never in `localStorage`/`sessionStorage` — already forbidden by this contract's stack rules, and this is why. Cookie name `sd_session` — not specified by the phase prompt, signed off by the human 2026-08-14 (see §14 v2.1). Signed with `SESSION_SECRET` (§4).
 - Lifetime: 30 days, sliding renewal on activity (each authenticated request that succeeds extends it, rather than a fixed absolute expiry).
 - Every authenticated endpoint resolves `current_user` and `current_org` via a single FastAPI dependency. No endpoint reads an `org_id` out of the request body to decide authorisation — the session is the only source of "which org."
 - OTP rules (all mandatory): 6 digits generated via `secrets`, stored only as a hash (never the plaintext code); 10-minute expiry; single use, invalidated immediately on a successful verify; max 5 verify attempts per code, then the code is burned regardless of whether the 6th attempt would have been correct; rate limit 3 requests per email per hour and 10 per IP per hour; code comparison is constant-time.
 - `POST /api/v1/auth/otp/request` always returns `202` with an identical body whether or not the account exists — an OTP flow that answers differently for a known vs. unknown email is a user-enumeration leak, same class of problem as the existing rule against leaking org/monitor existence in §Step 2/§Step 3's cross-org tests.
 - Roles (`UserRole`, §5) are enforced in a dependency, not scattered through handlers: `owner` — everything, including billing and deleting the org; `admin` — hostnames, alerts, members, no billing; `member` — read-only. A cross-org resource id returns `404`, never `403` — a member of org A must not learn that a given id belongs to org B.
+
+### 7.7 Auth & organisation endpoints (Phase 2 Step 2)
+
+Concrete request/response shapes for the endpoints §Step 2 names — §7.6 defined the scheme, this defines the wire format, the same relationship §7.5 has to Gate B's endpoints.
+
+| Method | Path | Purpose | Success |
+|---|---|---|---|
+| POST | `/api/v1/auth/otp/request` | request a sign-in code | 202 |
+| POST | `/api/v1/auth/otp/verify` | verify a code, start a session | 200 |
+| POST | `/api/v1/auth/logout` | end the current session | 200 |
+| GET | `/api/v1/auth/me` | the signed-in user | 200 |
+| GET | `/api/v1/orgs/current` | the caller's current org | 200 |
+| PATCH | `/api/v1/orgs/current` | rename it | 200 |
+| GET | `/api/v1/orgs/current/members` | list members, paginated | 200 |
+| POST | `/api/v1/orgs/current/members` | invite (or re-invite with a new role) | 201, or 200 if already a member |
+| DELETE | `/api/v1/orgs/current/members/{user_id}` | remove a member | 204 |
+
+```json
+POST /api/v1/auth/otp/request
+{ "email": "founder@example.com" }
+-> 202 { "message": "If that email has an account, we've sent a code." }
+
+POST /api/v1/auth/otp/verify
+{ "email": "founder@example.com", "code": "123456" }
+-> 200 User (§6.6), Set-Cookie: sd_session=...
+   400 OTP_INVALID | OTP_EXPIRED
+
+POST /api/v1/auth/logout
+-> 200 { "message": "Logged out." }
+
+GET /api/v1/auth/me
+-> 200 User | 401 UNAUTHENTICATED
+
+PATCH /api/v1/orgs/current
+{ "name": "Acme Inc" }
+-> 200 Organisation (§6.7)
+```
+
+`PATCH /api/v1/orgs/current` is scoped to `name` only — `country`/`currency` are "changeable only before the first subscription" (§Step 6) and don't belong behind a plain rename endpoint.
+
+`GET /api/v1/orgs/current/members` returns `PaginatedList<MembershipWithEmail>` (§6.14) — `MembershipWithEmail` is §6.8 `Membership` plus one field, `email: string`, because a member list without it isn't usable in a UI. Not a new top-level contract shape, just the obvious minimum enrichment.
+
+`POST /api/v1/orgs/current/members` — `{ "email": "...", "role": "member" }` → `MembershipWithEmail`. If the email is already a member, this updates their role instead of erroring (`200`, not `201`) — deliberate: no separate "change role" endpoint exists yet, and re-inviting to change a role is a reasonable idempotent action rather than a conflict. If the email has no `User` yet, one is created unverified — the invited person's first OTP login (§7.6) finds it and attaches to this org, never a second personal org.
+
+Only `owner`/`admin` can reach the three member-management endpoints; `member` gets `403 FORBIDDEN`. Removing the last remaining `owner` from an org is refused with `403 FORBIDDEN` — an ownerless org is an unrecoverable state through any endpoint this contract defines.
 
 ---
 
@@ -965,3 +1013,4 @@ A phase is complete only when all of these are true:
 | 1.5 | 2026-08-12 | Gate C: production deployment. New §4 vars `SENTRY_DSN` (api + worker) and `NEXT_PUBLIC_SENTRY_DSN` (web) — both empty by default, Sentry never initialised without one. No other contract-surface change (no new endpoints, fields, or finding codes); the rest of Gate C's deliverables (`docker-compose.prod.yml`, `Caddyfile`, `scripts/backup.sh`/`restore.sh`, `docs/DEPLOY.md`) are deployment infrastructure, not API contract. Two log-hygiene bugs found and fixed while verifying this live (both outside the JSON contract, noted here since they're exactly the DPDP posture CLAUDE.md rule 10 and this gate's item 8 require): uvicorn's default access log and Caddy's default JSON access log both print the raw client IP on every request regardless of what application code does — `apps/api/Dockerfile.prod` now runs with `--no-access-log`, and `deploy/caddy/Caddyfile`'s `log` block deletes `request>remote_ip`/`remote_port`/`X-Forwarded-For`. Confirmed live via `docker compose logs`. Separately, `LOG_LEVEL` (§4, present since v1.0) was a defined setting nothing ever applied — `app/logging_config.py` (new) wires it up for both the api and worker processes, and switches request logging to JSON so `request_id` (§7.4: "included in every log line for that request") actually appears, which a bare format string had been silently dropping. |
 | 1.4 | 2026-08-11 | Gate A follow-ups A2 and A4 (`docs/GATE_A_FOLLOWUPS.md`), closed before Gate C. **A2:** §8 `CERT_WEAK_SIGNATURE` now scoped to every certificate in the presented chain except the self-signed root, with `evidence.position` naming which one — was leaf-only. New §8 code `TLS_WEAK_KEY_EXCHANGE` (tls, high); new §6.4 `tls.data.key_exchange` field (`type`/`bits`/`curve`, each nullable — `bits`/`curve` are null in every live scan today since pyOpenSSL exposes no negotiated-group getter, confirmed by direct introspection, not assumed; the finding only fires when `bits` is actually known, never guessed per §10). **A4:** `DOMAIN_EXPIRING_CRITICAL` demoted from critical to high — a WHOIS-derived finding must not be able to force a healthy TLS setup to `F` on its own. §9 Step 4: `DOMAIN_EXPIRING_CRITICAL`/`DOMAIN_EXPIRING_SOON` excluded from both grade-cap overrides entirely (still scored normally in Step 1, still shown at their own severity). Finding copy for both now explicitly attributes the claim to "the registry record" rather than the scanner's own voice. Test-hygiene items A3 (network-dependent tests marked and excluded from the default `pytest` run) and A5 (classifier-level unit coverage for `TLS_WEAK_CIPHER`/`TLS_WEAK_KEY_EXCHANGE`) closed alongside this amendment but don't change the contract itself. |
 | 2.0 | 2026-08-14 | Phase 2 Step 1: accounts, orgs, monitoring, alerts, billing — contract surface only, no implementation yet (`docs/PHASE_2_PROMPT.md` Step 1). New §5 enums: `UserRole`, `PlanCode`, `SubscriptionState`, `BillingProvider`, `BillingInterval`, `Currency`, `AlertType`, `AlertChannel`, `AlertState`, `MonitorState`, `OtpPurpose`, and `InvoiceState` (**CONTRACT GAP** — not named by the phase prompt, proposed as `"open" \| "paid" \| "void" \| "uncollectible"`, needs explicit sign-off). New §5.1 `app/plans.py` pricing table (`free`/`watch`/`watch_pro` purchasable; `secure`/`compliance` enum-only, "contact us" at checkout). New §6.6–§6.13 data shapes: `User`, `Organisation`, `Membership`, `MonitoredHostname`, `AlertRecipient`, `AlertEvent`, `Subscription`, `Invoice`. New §6.14 paginated list envelope (`per_page` max `100` — proposed, not specified). New §4 var `SESSION_SECRET` (proposed name/mechanism — not specified). New §7.6 auth scheme: httpOnly/Secure/SameSite=Lax session cookie (`sd_session`, name proposed), 30-day sliding session, email OTP only, role enforcement via dependency, cross-org ids 404 not 403. §7.4 error table gains `UNAUTHENTICATED`, `FORBIDDEN`, `OTP_INVALID`, `OTP_EXPIRED`, `OTP_RATE_LIMITED`, `QUOTA_EXCEEDED`, `PLAN_REQUIRED`, `DUPLICATE_HOSTNAME`. Deliberately **not** in this amendment: `Organisation` alert-preference fields (timezone/quiet-hours/digest — Step 5's concern), Razorpay/Stripe env vars (Step 6's concern), the `QUOTA_EXCEEDED` error `details` payload shape (Step 3's concern) — adding them now ahead of the step that actually needs them would be exactly the "generated but not yet defined" drift rule 9 exists to prevent. |
+| 2.1 | 2026-08-14 | Phase 2 Step 2 implementation: OTP auth, users/orgs/memberships, session cookie, role enforcement (`docs/PHASE_2_PROMPT.md` Step 2). Two necessary additions discovered while building it, not anticipated by v2.0, flagged rather than silently assumed: new §4 vars `RESEND_API_KEY`/`EMAIL_FROM_ADDRESS` (OTP delivery needs a real provider now, before Step 5's own `app/notify/email.py` was going to exist — that module is built early, in Step 2, for exactly this reason) and new §7.4 code `NOT_FOUND` (404) — §7.6's "cross-org id returns 404" rule had nothing to return, since `SCAN_NOT_FOUND` is scan-specific; used from the new §7.7 member endpoints onward, and will cover monitors in Step 3. New §7.7: concrete request/response shapes for every §Step 2 endpoint, `MembershipWithEmail` (§6.8 `Membership` plus `email` — a member list is unusable without it, not a new top-level shape). Member invite is idempotent (re-inviting an existing member updates their role, `200`, rather than a conflict `409` — no separate role-change endpoint exists yet). Removing an org's last `owner` is refused (`403`) rather than left possible. `PATCH /api/v1/orgs/current` scoped to `name` only — `country`/`currency` stay locked until Step 6's "changeable only before the first subscription" rule has somewhere to live. Human sign-off received on all four items v2.0 proposed pending confirmation: `InvoiceState` (`"open" \| "paid" \| "void" \| "uncollectible"`), `SESSION_SECRET` as the env var name/mechanism, `sd_session` as the cookie name, and `100` as the pagination `per_page` ceiling — none of these values changed, only their status from proposed to confirmed. |
