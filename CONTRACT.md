@@ -149,6 +149,7 @@ RATE_LIMIT_PER_HOSTNAME_PER_HOUR=6
 PUBLIC_BASE_URL=http://localhost:3000
 ADMIN_TOKEN=                        # Gate B: gates GET /api/v1/admin/stats. Empty = endpoint always 403.
 SENTRY_DSN=                         # Gate C: error tracking (api + worker). Empty = Sentry never initialised.
+SESSION_SECRET=                     # Phase 2 §7.6: signs the session cookie. Not named by the phase prompt — proposed here, flag if a different name/mechanism is wanted.
 
 # --- web ---
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
@@ -174,9 +175,37 @@ ReadinessVerdict  = "automated" | "semi_automated" | "manual" | "unknown"
 LifetimePhase     = "pre_2026" | "phase_200" | "phase_100" | "phase_47"
 SpfPolicy         = "none" | "neutral" | "softfail" | "fail" | "absent"
 DmarcPolicy       = "none" | "quarantine" | "reject" | "absent"
+
+// --- Phase 2 additions (v2.0) ---
+UserRole          = "owner" | "admin" | "member"
+PlanCode          = "free" | "watch" | "watch_pro" | "secure" | "compliance"
+SubscriptionState = "trialing" | "active" | "past_due" | "cancelled" | "expired"
+BillingProvider   = "razorpay" | "stripe"
+BillingInterval   = "monthly" | "annual"
+Currency          = "INR" | "USD"
+AlertType         = "cert_expiry" | "domain_expiry" | "grade_regression" | "scan_failure" | "new_critical_finding"
+AlertChannel      = "email"                 // single-value today so Phase 3 can add "whatsapp"/"slack" without a shape change
+AlertState        = "pending" | "sent" | "failed" | "suppressed"
+MonitorState      = "active" | "paused" | "quota_blocked" | "verification_pending"
+OtpPurpose        = "login" | "email_change"
+InvoiceState      = "open" | "paid" | "void" | "uncollectible"   // CONTRACT GAP: not specified by the phase prompt's §1.1 enum list — Invoice (§6.9) needs a closed state set and this is a reasonable default (mirrors Stripe's own), but it needs the human's sign-off, not an assumption baked in silently.
 ```
 
 `overall_grade` and every module `grade` use the `Grade` set. Grade colours are fixed in section 12.
+
+### 5.1 Plans — single source of truth, `app/plans.py` (Phase 2)
+
+The API, the pricing page, and every quota check read prices and limits from `app/plans.py` — never a hardcoded number in a handler or a component.
+
+| Code | ₹/mo | $/mo | Hostnames | Scan interval | Alert lead days | Members |
+|---|---|---|---|---|---|---|
+| `free` | 0 | 0 | 3 | 24h | 14, 3 | 1 |
+| `watch` | 999 | 29 | 25 | 6h | 60, 30, 14, 7, 3, 1 | 3 |
+| `watch_pro` | 2999 | 79 | 100 | 6h | 60, 30, 14, 7, 3, 1 | 10 |
+
+`secure` and `compliance` exist in `PlanCode` and in the pricing table today, but are **not purchasable** in Phase 2 — checkout returns a "contact us" path for them. Their features (sidecar, auto-TLS, compliance evidence packs) are Phase 3+ and must not be built now.
+
+Annual billing is monthly rate × 12 × 0.7 (30% off). Surfaced prominently at checkout — cash today is worth more than ARPA later.
 
 ---
 
@@ -416,6 +445,148 @@ Verdict inference rules (backend, deterministic):
 
 These dates are hardcoded constants in `app/scanner/readiness.py`. `days_remaining` is computed server-side at request time.
 
+### 6.6 `User` (Phase 2)
+
+```jsonc
+{
+  "user_id": "3a1c...",
+  "email": "founder@example.com",
+  "email_verified": true,
+  "created_at": "2026-08-09T10:14:03Z",
+  "last_login_at": "2026-08-09T10:14:03Z"   // nullable — null until first successful OTP verify
+}
+```
+
+No password field exists anywhere in this shape or the database — email OTP only (§7.6). There is nothing to hash, store, or breach.
+
+### 6.7 `Organisation` (Phase 2)
+
+```jsonc
+{
+  "org_id": "3a1c...",
+  "name": "Acme Inc",
+  "country": "IN",           // ISO 3166-1 alpha-2, set at signup, drives billing provider selection (§Step 6)
+  "currency": "INR",         // Currency
+  "plan_code": "free",       // PlanCode
+  "created_at": "2026-08-09T10:14:03Z"
+}
+```
+
+Created automatically as a personal org on first OTP login (§7.6). Per-org alert preferences (timezone, quiet-hours window, digest mode) are **not** in this shape yet — Step 5 will need a small follow-up amendment to add them when the alert engine is built; not invented here ahead of that need.
+
+### 6.8 `Membership` (Phase 2)
+
+```jsonc
+{
+  "org_id": "3a1c...",
+  "user_id": "3a1c...",
+  "role": "owner",           // UserRole
+  "invited_by": null,        // uuid, nullable — null for the org's creator, otherwise the inviting user's id
+  "joined_at": "2026-08-09T10:14:03Z"
+}
+```
+
+### 6.9 `MonitoredHostname` (Phase 2)
+
+```jsonc
+{
+  "monitor_id": "3a1c...",
+  "org_id": "3a1c...",
+  "hostname": "example.com",
+  "port": 443,
+  "state": "active",             // MonitorState
+  "label": "Production",         // nullable
+  "notes": null,                 // nullable
+  "last_scan_id": "8f1c...",     // nullable — null before the first scheduled scan runs
+  "last_grade": "A+",            // Grade, nullable
+  "last_score": 97,              // nullable
+  "last_scanned_at": "2026-08-09T10:14:03Z",  // nullable
+  "next_scan_at": "2026-08-09T16:14:03Z",     // nullable — null when state is not "active"
+  "days_until_expiry": 88,       // nullable
+  "created_at": "2026-08-09T10:14:03Z"
+}
+```
+
+Reuses §7.2 hostname normalisation and §10 safety guard unchanged — no parallel validation path for monitored hostnames.
+
+### 6.10 `AlertRecipient` (Phase 2)
+
+```jsonc
+{
+  "recipient_id": "3a1c...",
+  "org_id": "3a1c...",
+  "monitor_id": null,        // uuid, nullable — null means org-wide (every monitor), non-null scopes to one monitor
+  "email": "ops@example.com",
+  "verified": true,
+  "created_at": "2026-08-09T10:14:03Z"
+}
+```
+
+### 6.11 `AlertEvent` (Phase 2)
+
+```jsonc
+{
+  "alert_id": "3a1c...",
+  "org_id": "3a1c...",
+  "monitor_id": "3a1c...",
+  "type": "cert_expiry",     // AlertType
+  "state": "sent",           // AlertState
+  "severity": "high",        // Severity (§5, reused unchanged)
+  "subject": "example.com — certificate expires in 7 days",
+  "dedupe_key": "3a1c...:cert_expiry:7",   // "{monitor_id}:{type}:{threshold}" — a key already in "sent" state never sends again (§Step 5)
+  "scheduled_for": "2026-08-09T10:14:03Z",
+  "sent_at": null,           // nullable — null until state becomes "sent"
+  "recipients": ["ops@example.com"],
+  "payload": {}               // object — template data for the email, shape is module/type-specific and not enumerated here
+}
+```
+
+### 6.12 `Subscription` (Phase 2)
+
+```jsonc
+{
+  "subscription_id": "3a1c...",
+  "org_id": "3a1c...",
+  "plan_code": "watch",              // PlanCode
+  "provider": "razorpay",            // BillingProvider
+  "interval": "monthly",             // BillingInterval
+  "currency": "INR",                 // Currency
+  "state": "active",                 // SubscriptionState
+  "current_period_start": "2026-08-09T10:14:03Z",
+  "current_period_end": "2026-09-09T10:14:03Z",
+  "cancel_at_period_end": false,
+  "provider_subscription_id": null   // nullable — null until the provider's checkout/webhook confirms it (§Step 6)
+}
+```
+
+### 6.13 `Invoice` (Phase 2)
+
+```jsonc
+{
+  "invoice_id": "3a1c...",
+  "org_id": "3a1c...",
+  "number": "INV-2026-000123",
+  "amount_minor": 99900,     // integer, minor units (paise/cents) — NEVER a float, never a formatted string
+  "currency": "INR",         // Currency
+  "state": "paid",           // InvoiceState — CONTRACT GAP, see §5's InvoiceState note
+  "issued_at": "2026-08-09T10:14:03Z",
+  "paid_at": "2026-08-09T10:14:03Z",   // nullable
+  "pdf_url": null,           // nullable string
+  "gstin": null,              // nullable — customer-supplied GSTIN, India only
+  "place_of_supply": null     // nullable — India tax field, captured now even though rate logic stays simple (retrofitting means reissuing invoices)
+}
+```
+
+`amount_minor` + `currency` is the only money representation anywhere in this contract, Phase 2 onward — no exceptions, matching §2 rule 1's `snake_case` discipline: one shape, everywhere.
+
+### 6.14 Paginated list envelope (Phase 2, every list endpoint)
+
+```jsonc
+{ "items": [], "page": 1, "per_page": 25, "total": 137, "has_more": true }
+```
+
+`page` defaults to `1`, `per_page` defaults to `25`. Maximum `per_page` is `100` — not specified by the phase prompt, proposed here as a sensible ceiling, flag if a different cap is wanted.
+
 ---
 
 ## 7. API surface (Phase 1)
@@ -497,6 +668,14 @@ Closed set of error codes and their HTTP statuses:
 | `SCAN_FAILED` | 200 | *not an HTTP error* — returned inside `Scan.error` |
 | `UPSTREAM_TIMEOUT` | 504 | our own dependency timed out |
 | `INTERNAL_ERROR` | 500 | anything else |
+| `UNAUTHENTICATED` | 401 | no valid session cookie (Phase 2) |
+| `FORBIDDEN` | 403 | authenticated, but the role doesn't permit this action (Phase 2) |
+| `OTP_INVALID` | 400 | wrong code, or code already used (Phase 2) |
+| `OTP_EXPIRED` | 400 | code past its 10-minute window (Phase 2) |
+| `OTP_RATE_LIMITED` | 429 | too many OTP requests or verify attempts (Phase 2) |
+| `QUOTA_EXCEEDED` | 402 | monitored-hostname quota hit for the org's plan (Phase 2) |
+| `PLAN_REQUIRED` | 402 | action needs a plan the org doesn't have (Phase 2) |
+| `DUPLICATE_HOSTNAME` | 409 | hostname already monitored in this org (Phase 2) |
 
 A hostname that simply doesn't resolve is **not** an HTTP error. It is a `Scan` with `status: "failed"` and `error.code: "SCAN_FAILED"`, so the user still gets a shareable page.
 
@@ -517,6 +696,17 @@ Response `200`:
 `scan_id` referring to no known scan → `404 SCAN_NOT_FOUND`, same as `GET /api/v1/scans/{scan_id}`.
 
 `GET /api/v1/admin/stats?token=<ADMIN_TOKEN>` returns a `text/plain` table: `daily_stats` for the last 30 days, then the last 100 scanned hostnames (`created_at`, `status`, `overall_grade`, `hostname`). Missing or mismatched `token` → `403`, plain text `Forbidden`, compared with `secrets.compare_digest`. Not part of the JSON API surface and not called by the frontend — it is a page a human opens directly.
+
+### 7.6 Auth scheme (Phase 2)
+
+Email OTP only. No passwords, no OAuth — nothing to hash, nothing to breach, no password-reset flow to build.
+
+- Session token in a cookie: `httpOnly`, `Secure`, `SameSite=Lax`. Never in `localStorage`/`sessionStorage` — already forbidden by this contract's stack rules, and this is why. Cookie name `sd_session` — not specified by the phase prompt, proposed here, flag if a different name is wanted. Signed with `SESSION_SECRET` (§4).
+- Lifetime: 30 days, sliding renewal on activity (each authenticated request that succeeds extends it, rather than a fixed absolute expiry).
+- Every authenticated endpoint resolves `current_user` and `current_org` via a single FastAPI dependency. No endpoint reads an `org_id` out of the request body to decide authorisation — the session is the only source of "which org."
+- OTP rules (all mandatory): 6 digits generated via `secrets`, stored only as a hash (never the plaintext code); 10-minute expiry; single use, invalidated immediately on a successful verify; max 5 verify attempts per code, then the code is burned regardless of whether the 6th attempt would have been correct; rate limit 3 requests per email per hour and 10 per IP per hour; code comparison is constant-time.
+- `POST /api/v1/auth/otp/request` always returns `202` with an identical body whether or not the account exists — an OTP flow that answers differently for a known vs. unknown email is a user-enumeration leak, same class of problem as the existing rule against leaking org/monitor existence in §Step 2/§Step 3's cross-org tests.
+- Roles (`UserRole`, §5) are enforced in a dependency, not scattered through handlers: `owner` — everything, including billing and deleting the org; `admin` — hostnames, alerts, members, no billing; `member` — read-only. A cross-org resource id returns `404`, never `403` — a member of org A must not learn that a given id belongs to org B.
 
 ---
 
@@ -774,3 +964,4 @@ A phase is complete only when all of these are true:
 | 1.3 | 2026-08-11 | Gate B: funnel capture. New §4 var `ADMIN_TOKEN`. New §7.5 endpoints `POST /api/v1/waitlist` and `GET /api/v1/admin/stats` (the latter is `text/plain`, the one documented exception to §7's "all responses `application/json`"). New §11 tables `waitlist_signups` and `daily_stats`. No auth, plans, billing, or scheduled scanning added — out of Phase 1 scope per `docs/PHASE_1_GATE.md` Gate B. |
 | 1.5 | 2026-08-12 | Gate C: production deployment. New §4 vars `SENTRY_DSN` (api + worker) and `NEXT_PUBLIC_SENTRY_DSN` (web) — both empty by default, Sentry never initialised without one. No other contract-surface change (no new endpoints, fields, or finding codes); the rest of Gate C's deliverables (`docker-compose.prod.yml`, `Caddyfile`, `scripts/backup.sh`/`restore.sh`, `docs/DEPLOY.md`) are deployment infrastructure, not API contract. Two log-hygiene bugs found and fixed while verifying this live (both outside the JSON contract, noted here since they're exactly the DPDP posture CLAUDE.md rule 10 and this gate's item 8 require): uvicorn's default access log and Caddy's default JSON access log both print the raw client IP on every request regardless of what application code does — `apps/api/Dockerfile.prod` now runs with `--no-access-log`, and `deploy/caddy/Caddyfile`'s `log` block deletes `request>remote_ip`/`remote_port`/`X-Forwarded-For`. Confirmed live via `docker compose logs`. Separately, `LOG_LEVEL` (§4, present since v1.0) was a defined setting nothing ever applied — `app/logging_config.py` (new) wires it up for both the api and worker processes, and switches request logging to JSON so `request_id` (§7.4: "included in every log line for that request") actually appears, which a bare format string had been silently dropping. |
 | 1.4 | 2026-08-11 | Gate A follow-ups A2 and A4 (`docs/GATE_A_FOLLOWUPS.md`), closed before Gate C. **A2:** §8 `CERT_WEAK_SIGNATURE` now scoped to every certificate in the presented chain except the self-signed root, with `evidence.position` naming which one — was leaf-only. New §8 code `TLS_WEAK_KEY_EXCHANGE` (tls, high); new §6.4 `tls.data.key_exchange` field (`type`/`bits`/`curve`, each nullable — `bits`/`curve` are null in every live scan today since pyOpenSSL exposes no negotiated-group getter, confirmed by direct introspection, not assumed; the finding only fires when `bits` is actually known, never guessed per §10). **A4:** `DOMAIN_EXPIRING_CRITICAL` demoted from critical to high — a WHOIS-derived finding must not be able to force a healthy TLS setup to `F` on its own. §9 Step 4: `DOMAIN_EXPIRING_CRITICAL`/`DOMAIN_EXPIRING_SOON` excluded from both grade-cap overrides entirely (still scored normally in Step 1, still shown at their own severity). Finding copy for both now explicitly attributes the claim to "the registry record" rather than the scanner's own voice. Test-hygiene items A3 (network-dependent tests marked and excluded from the default `pytest` run) and A5 (classifier-level unit coverage for `TLS_WEAK_CIPHER`/`TLS_WEAK_KEY_EXCHANGE`) closed alongside this amendment but don't change the contract itself. |
+| 2.0 | 2026-08-14 | Phase 2 Step 1: accounts, orgs, monitoring, alerts, billing — contract surface only, no implementation yet (`docs/PHASE_2_PROMPT.md` Step 1). New §5 enums: `UserRole`, `PlanCode`, `SubscriptionState`, `BillingProvider`, `BillingInterval`, `Currency`, `AlertType`, `AlertChannel`, `AlertState`, `MonitorState`, `OtpPurpose`, and `InvoiceState` (**CONTRACT GAP** — not named by the phase prompt, proposed as `"open" \| "paid" \| "void" \| "uncollectible"`, needs explicit sign-off). New §5.1 `app/plans.py` pricing table (`free`/`watch`/`watch_pro` purchasable; `secure`/`compliance` enum-only, "contact us" at checkout). New §6.6–§6.13 data shapes: `User`, `Organisation`, `Membership`, `MonitoredHostname`, `AlertRecipient`, `AlertEvent`, `Subscription`, `Invoice`. New §6.14 paginated list envelope (`per_page` max `100` — proposed, not specified). New §4 var `SESSION_SECRET` (proposed name/mechanism — not specified). New §7.6 auth scheme: httpOnly/Secure/SameSite=Lax session cookie (`sd_session`, name proposed), 30-day sliding session, email OTP only, role enforcement via dependency, cross-org ids 404 not 403. §7.4 error table gains `UNAUTHENTICATED`, `FORBIDDEN`, `OTP_INVALID`, `OTP_EXPIRED`, `OTP_RATE_LIMITED`, `QUOTA_EXCEEDED`, `PLAN_REQUIRED`, `DUPLICATE_HOSTNAME`. Deliberately **not** in this amendment: `Organisation` alert-preference fields (timezone/quiet-hours/digest — Step 5's concern), Razorpay/Stripe env vars (Step 6's concern), the `QUOTA_EXCEEDED` error `details` payload shape (Step 3's concern) — adding them now ahead of the step that actually needs them would be exactly the "generated but not yet defined" drift rule 9 exists to prevent. |
