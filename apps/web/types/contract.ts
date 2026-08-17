@@ -65,7 +65,18 @@ export type ErrorCode =
   | "SCAN_NOT_FOUND"
   | "SCAN_FAILED"
   | "UPSTREAM_TIMEOUT"
-  | "INTERNAL_ERROR";
+  | "INTERNAL_ERROR"
+  // --- Phase 2 additions (contract v2.0-v2.5) ---
+  | "UNAUTHENTICATED"
+  | "FORBIDDEN"
+  | "OTP_INVALID"
+  | "OTP_EXPIRED"
+  | "OTP_RATE_LIMITED"
+  | "QUOTA_EXCEEDED"
+  | "PLAN_REQUIRED"
+  | "DUPLICATE_HOSTNAME"
+  | "NOT_FOUND"
+  | "WEBHOOK_INVALID_SIGNATURE";
 
 export interface ApiError {
   code: ErrorCode;
@@ -554,3 +565,77 @@ export interface UnsubscribeResponse {
 }
 
 // GET /api/v1/alerts/unsubscribe/{recipient_id} -> UnsubscribeResponse (200) | 404 NOT_FOUND
+
+// --- 6.12/6.13 / 7.11 Billing (Phase 2 Step 6) ---
+
+export interface Subscription {
+  subscription_id: string;
+  org_id: string;
+  plan_code: PlanCode;
+  provider: BillingProvider;
+  interval: BillingInterval;
+  currency: Currency;
+  state: SubscriptionState;
+  current_period_start: string;
+  current_period_end: string;
+  cancel_at_period_end: boolean;
+  provider_subscription_id: string | null;
+}
+
+export interface Invoice {
+  invoice_id: string;
+  org_id: string;
+  number: string;
+  amount_minor: number;
+  currency: Currency;
+  state: InvoiceState;
+  issued_at: string;
+  paid_at: string | null;
+  pdf_url: string | null;
+  gstin: string | null;
+  place_of_supply: string | null;
+}
+
+// §7.11 GET /billing/plans row — one per PlanCode (§5.1's order), always.
+// purchasable === false plans (secure/compliance) carry both amount fields
+// null, never 0.
+export interface PricedPlan {
+  plan_code: PlanCode;
+  purchasable: boolean;
+  currency: Currency;
+  monthly_amount_minor: number | null;
+  annual_amount_minor: number | null;
+  hostname_limit: number | null;
+  scan_interval_hours: number | null;
+  alert_lead_days: number[];
+  member_limit: number | null;
+}
+
+export interface BillingPlansResponse {
+  plans: PricedPlan[];
+}
+
+export interface BillingCheckoutRequest {
+  plan_code: PlanCode;
+  interval: BillingInterval;
+  // India tax fields (§6.13), optional — captured at checkout, the one
+  // point in this flow where a customer and a purchase meet.
+  gstin?: string | null;
+  place_of_supply?: string | null;
+}
+
+export interface BillingCheckoutResponse {
+  checkout_url: string | null;
+  provider: BillingProvider | null;
+  contact_us: boolean;
+}
+
+// Every route below requires `owner` (§7.6/§7.11) — `admin`/`member` get
+// 403 FORBIDDEN on the plain GETs too, not just the writes.
+// GET /api/v1/billing/plans -> BillingPlansResponse
+// POST /api/v1/billing/checkout -> BillingCheckoutResponse
+// POST /api/v1/billing/webhooks/razorpay -> { status: "ok" } (200) | 400 WEBHOOK_INVALID_SIGNATURE
+// POST /api/v1/billing/webhooks/stripe -> { status: "ok" } (200) | 400 WEBHOOK_INVALID_SIGNATURE
+// GET /api/v1/billing/subscription -> Subscription | null
+// POST /api/v1/billing/cancel -> Subscription | 404 NOT_FOUND
+// GET /api/v1/billing/invoices?page=&per_page= -> PaginatedList<Invoice>

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.enums import PlanCode
+from app.enums import BillingInterval, Currency, PlanCode
 
 
 @dataclass(frozen=True)
@@ -98,3 +98,21 @@ def get_plan(code: PlanCode) -> PlanDefinition:
 
 def next_purchasable_plan(code: PlanCode) -> PlanCode | None:
     return _NEXT_PURCHASABLE_PLAN.get(code)
+
+
+def priced_amount_minor(
+    plan: PlanDefinition, currency: Currency, interval: BillingInterval
+) -> int | None:
+    """§5.1/§7.11: the amount one invoice for `plan` charges in `currency`,
+    for `interval`. `None` for a non-purchasable plan (secure/compliance) —
+    never `0`, which would misread as "free" rather than "not sold here"
+    (§Step 6: "contact us" at checkout, no numeric price exists to return).
+    Annual is `monthly x 12 x ANNUAL_DISCOUNT_MULTIPLIER` (§5.1), rounded to
+    the nearest minor unit — exact for every plan/currency combination in
+    the table today, never a guess."""
+    if not plan.purchasable:
+        return None
+    monthly = plan.inr_minor_monthly if currency == Currency.INR else plan.usd_minor_monthly
+    if interval == BillingInterval.ANNUAL:
+        return round(monthly * 12 * ANNUAL_DISCOUNT_MULTIPLIER)
+    return monthly

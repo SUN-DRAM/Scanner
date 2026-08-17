@@ -238,6 +238,14 @@ POST /api/v1/billing/webhooks/razorpay and /stripe — signature verification ma
 GET /api/v1/billing/subscription, POST /api/v1/billing/cancel (at period end, never immediate)
 GET /api/v1/billing/invoices (paginated)
 
+Environment Variables & Test Credentials:
+   - Update .env.example, .env.production.example, and local .env to include placeholders for Razorpay test keys:
+     RAZORPAY_KEY_ID=
+     RAZORPAY_KEY_SECRET=
+     RAZORPAY_WEBHOOK_SECRET=
+     STRIPE_SECRET_KEY=
+     STRIPE_WEBHOOK_SECRET=
+
 Provider selection: INR → Razorpay, USD → Stripe, from org country at signup, changeable only before the first subscription.
 
 Webhooks are the source of truth for subscription state, not the checkout redirect. Handle them idempotently — providers retry, and double-applying a plan change is a real bug. Store the provider event id and skip duplicates.

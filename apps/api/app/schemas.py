@@ -14,10 +14,13 @@ from typing import Annotated, Any, Generic, Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, PlainSerializer, field_validator
 
 from app.enums import (
+    BillingInterval,
+    BillingProvider,
     Currency,
     DigestMode,
     DmarcPolicy,
     Grade,
+    InvoiceState,
     LifetimePhase,
     ModuleName,
     ModuleStatus,
@@ -27,6 +30,7 @@ from app.enums import (
     ScanStatus,
     Severity,
     SpfPolicy,
+    SubscriptionState,
     UserRole,
 )
 from app.errors import ApiError, ErrorCode
@@ -600,3 +604,71 @@ class MonitorHistoryEntry(ContractModel):
 
 class UnsubscribeResponse(ContractModel):
     message: str
+
+
+# --- 6.12/6.13 / 7.11 Billing (Phase 2 Step 6) ---
+
+
+class Subscription(ContractModel):
+    subscription_id: str
+    org_id: str
+    plan_code: PlanCode
+    provider: BillingProvider
+    interval: BillingInterval
+    currency: Currency
+    state: SubscriptionState
+    current_period_start: UtcDatetime
+    current_period_end: UtcDatetime
+    cancel_at_period_end: bool
+    provider_subscription_id: str | None
+
+
+class Invoice(ContractModel):
+    invoice_id: str
+    org_id: str
+    number: str
+    amount_minor: int
+    currency: Currency
+    state: InvoiceState
+    issued_at: UtcDatetime
+    paid_at: UtcDatetime | None
+    pdf_url: str | None
+    gstin: str | None
+    place_of_supply: str | None
+
+
+class PricedPlan(ContractModel):
+    """§7.11 `GET /billing/plans` row — one per `PlanCode` (§5.1's order),
+    always. `purchasable is False` plans (secure/compliance) carry both
+    amount fields `null`, never `0`."""
+
+    plan_code: PlanCode
+    purchasable: bool
+    currency: Currency
+    monthly_amount_minor: int | None
+    annual_amount_minor: int | None
+    hostname_limit: int | None
+    scan_interval_hours: int | None
+    alert_lead_days: list[int]
+    member_limit: int | None
+
+
+class BillingPlansResponse(ContractModel):
+    plans: list[PricedPlan]
+
+
+class BillingCheckoutRequest(ContractModel):
+    plan_code: PlanCode
+    interval: BillingInterval
+    # India tax fields (§6.13) — optional, captured here because checkout is
+    # the one point in this flow where a customer and a purchase meet
+    # (CONTRACT.md §7.11 amendment note). Carried through to every Invoice
+    # a confirmed subscription later produces.
+    gstin: str | None = None
+    place_of_supply: str | None = None
+
+
+class BillingCheckoutResponse(ContractModel):
+    checkout_url: str | None
+    provider: BillingProvider | None
+    contact_us: bool

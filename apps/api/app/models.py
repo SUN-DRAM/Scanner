@@ -358,6 +358,104 @@ class AlertRecipientRecord(Base):
     __table_args__ = (Index("alert_recipients_org_id_idx", "org_id"),)
 
 
+class SubscriptionRecord(Base):
+    """Contract §6.12 `Subscription`. First written by Step 6 (§7.11) — v2.0
+    only reserved the shape. One row per org that has ever completed a
+    checkout (`org_id` unique): a webhook upserts this in place rather than
+    inserting a second row, so a cancel-then-resubscribe cycle still has
+    exactly one `Subscription` per org, matching the contract shape (a
+    single object, not a list — there is no "list subscriptions"
+    endpoint). A free org that has never checked out has no row at all;
+    `GET /billing/subscription` returns `null`, not `404`."""
+
+    __tablename__ = "subscriptions"
+
+    subscription_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organisations.org_id"), nullable=False, unique=True
+    )
+    plan_code: Mapped[str] = mapped_column(String(20), nullable=False)
+    provider: Mapped[str] = mapped_column(String(20), nullable=False)
+    interval: Mapped[str] = mapped_column(String(10), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="trialing")
+    current_period_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    current_period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    cancel_at_period_end: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    provider_subscription_id: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("subscriptions_org_id_idx", "org_id"),)
+
+
+class InvoiceRecord(Base):
+    """Contract §6.13 `Invoice`. One row per successful charge (a
+    `subscription.charged`/`invoice.paid` webhook event, §7.11) — Phase 2
+    has no refund/void flow, so a row is never edited after creation except
+    by a future phase. `number` follows the contract's own example format
+    (`INV-{year}-{6-digit sequence}`), generated in `app/billing/service.py`
+    with a unique-constraint retry, same mechanics as `scans.public_slug`'s
+    collision handling."""
+
+    __tablename__ = "invoices"
+
+    invoice_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organisations.org_id"), nullable=False
+    )
+    number: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    amount_minor: Mapped[int] = mapped_column(Integer, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="paid")
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pdf_url: Mapped[str | None] = mapped_column(String(500))
+    # India tax fields (§6.13) — captured at checkout time (§7.11's
+    # BillingCheckoutRequest), carried through the provider's own
+    # metadata/notes, and copied here from the webhook event that produced
+    # this invoice. Both null when the customer supplied neither.
+    gstin: Mapped[str | None] = mapped_column(String(20))
+    place_of_supply: Mapped[str | None] = mapped_column(String(100))
+
+    __table_args__ = (Index("invoices_org_id_idx", "org_id", text("issued_at DESC")),)
+
+
+class BillingEventRecord(Base):
+    """Not part of the JSON contract. Idempotency ledger for provider
+    webhooks (§Step 6: "Handle them idempotently — providers retry, and
+    double-applying a plan change is a real bug. Store the provider event id
+    and skip duplicates.") — one row per `(provider, event_id)` ever
+    successfully processed, inserted before any `subscriptions`/`invoices`/
+    `organisations` row is touched; a retried delivery hits the unique
+    constraint and is recognised as a duplicate, same collision-as-signal
+    pattern `app/monitors.py`'s `DUPLICATE_HOSTNAME` handling already uses."""
+
+    __tablename__ = "billing_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    provider: Mapped[str] = mapped_column(String(20), nullable=False)
+    event_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("provider", "event_id", name="uq_billing_events_provider_event_id"),
+    )
+
+
 class DailyStatsRecord(Base):
     """One row per UTC day, upserted in place (`app.stats.increment_daily_stat`)
     rather than derived from `scans` — `share_link_opens` has no other table

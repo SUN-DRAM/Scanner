@@ -20,7 +20,7 @@ from app.errors import REQUEST_ID_HEADER, register_exception_handlers
 from app.logging_config import configure_logging
 from app.observability import init_sentry
 from app.redis_client import close_arq_pool
-from app.routers import admin, alerts, auth, health, meta, monitors, orgs, scans, waitlist
+from app.routers import admin, alerts, auth, billing, health, meta, monitors, orgs, scans, waitlist
 
 logger = logging.getLogger("app")
 
@@ -91,6 +91,7 @@ def create_app() -> FastAPI:
     app.include_router(orgs.router, prefix="/api/v1")
     app.include_router(monitors.router, prefix="/api/v1")
     app.include_router(alerts.router, prefix="/api/v1")
+    app.include_router(billing.router, prefix="/api/v1")
 
     return app
 

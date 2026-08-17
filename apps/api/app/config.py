@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     scheduler_max_concurrent_scans: int = Field(
         default=3, alias="SCHEDULER_MAX_CONCURRENT_SCANS"
     )
+    # Phase 2 Step 6 (§7.11/§4). Empty by default, same "empty = opt-in"
+    # pattern as resend_api_key above — app/billing/providers.py refuses to
+    # start a checkout or verify a webhook for a currency whose provider
+    # isn't configured, rather than silently pretending to work.
+    razorpay_key_id: str = Field(default="", alias="RAZORPAY_KEY_ID")
+    razorpay_key_secret: str = Field(default="", alias="RAZORPAY_KEY_SECRET")
+    razorpay_webhook_secret: str = Field(default="", alias="RAZORPAY_WEBHOOK_SECRET")
+    stripe_secret_key: str = Field(default="", alias="STRIPE_SECRET_KEY")
+    stripe_webhook_secret: str = Field(default="", alias="STRIPE_WEBHOOK_SECRET")
 
     @field_validator("cors_origins")
     @classmethod

@@ -48,6 +48,10 @@ class ErrorCode(StrEnum):
     # (Step 2) and flagged the same way SESSION_SECRET was: proposed out of
     # necessity, not silently assumed.
     NOT_FOUND = "NOT_FOUND"
+    # Phase 2 Step 6 (§7.11). CONTRACT GAP — not named by the phase prompt's
+    # §1.5 error list: "reject unverified with 400" (webhooks) needs a
+    # machine-readable code, and no existing one describes a bad signature.
+    WEBHOOK_INVALID_SIGNATURE = "WEBHOOK_INVALID_SIGNATURE"
 
 
 ERROR_CODE_HTTP_STATUS: dict[ErrorCode, int] = {
@@ -69,6 +73,7 @@ ERROR_CODE_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.PLAN_REQUIRED: status.HTTP_402_PAYMENT_REQUIRED,
     ErrorCode.DUPLICATE_HOSTNAME: status.HTTP_409_CONFLICT,
     ErrorCode.NOT_FOUND: status.HTTP_404_NOT_FOUND,
+    ErrorCode.WEBHOOK_INVALID_SIGNATURE: status.HTTP_400_BAD_REQUEST,
 }
 
 

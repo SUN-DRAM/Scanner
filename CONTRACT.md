@@ -153,6 +153,11 @@ SESSION_SECRET=                     # Phase 2 §7.6: signs the session cookie. N
 RESEND_API_KEY=                     # Phase 2 Step 2. CONTRACT GAP — see amendment 2.1: OTP delivery needs a real provider before Step 5's own app/notify/email.py is built. Empty = OTP codes are logged, not emailed.
 EMAIL_FROM_ADDRESS=                 # Phase 2 Step 2. Paired with RESEND_API_KEY above; both required to actually send.
 SCHEDULER_MAX_CONCURRENT_SCANS=3    # Phase 2 Step 4: caps concurrent scheduler-enqueued scans (§7.9) via a Redis semaphore, well under the worker's max_jobs of 10.
+RAZORPAY_KEY_ID=                    # Phase 2 Step 6 (§7.11). INR checkout/webhooks. Empty = Razorpay checkout refuses with INTERNAL_ERROR rather than silently pretending to work.
+RAZORPAY_KEY_SECRET=                # Paired with RAZORPAY_KEY_ID — Basic-auth credential for every Razorpay API call (app/billing/providers.py).
+RAZORPAY_WEBHOOK_SECRET=            # HMAC-SHA256 key verifying X-Razorpay-Signature on POST /api/v1/billing/webhooks/razorpay.
+STRIPE_SECRET_KEY=                  # Phase 2 Step 6 (§7.11). USD checkout/webhooks. Empty = Stripe checkout refuses with INTERNAL_ERROR the same way.
+STRIPE_WEBHOOK_SECRET=              # Verifies the Stripe-Signature header on POST /api/v1/billing/webhooks/stripe.
 
 # --- web ---
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
@@ -690,6 +695,7 @@ Closed set of error codes and their HTTP statuses:
 | `PLAN_REQUIRED` | 402 | action needs a plan the org doesn't have (Phase 2) |
 | `DUPLICATE_HOSTNAME` | 409 | hostname already monitored in this org (Phase 2) |
 | `NOT_FOUND` | 404 | generic entity-not-found for anything other than a scan (Phase 2). CONTRACT GAP — see amendment 2.1: §7.6's "cross-org id returns 404" rule needs a code that isn't `SCAN_NOT_FOUND`; used from Step 2 onward (org members, later monitors) |
+| `WEBHOOK_INVALID_SIGNATURE` | 400 | `POST /billing/webhooks/{razorpay,stripe}` (§7.11) rejects a payload whose signature doesn't verify against the configured webhook secret. CONTRACT GAP — see amendment 2.5: not named by the phase prompt's §1.5 error list, needed because "reject unverified with 400" (§Step 6) has nowhere else to hang a machine-readable code |
 
 A hostname that simply doesn't resolve is **not** an HTTP error. It is a `Scan` with `status: "failed"` and `error.code: "SCAN_FAILED"`, so the user still gets a shareable page.
 
@@ -882,6 +888,65 @@ Each is a **crossing** check (current value newly qualifies, the previous scan's
 **Delivery.** A second arq cron job (`deliver_alerts_tick`, same 5-minute cadence as §7.9's scheduler tick, `app/worker.py`) sends everything `pending` and due. Recipients: every `AlertRecipient` (§6.10) scoped to the org (`monitor_id: null`) or that specific monitor, minus anyone unsubscribed; falling back to every `owner`/`admin` membership's email when the org has added no recipients at all. No recipients found → the batch's events move straight to `state: "suppressed"`, not `sent`, not retried. `Retry 3x with backoff` reuses the delivery cron's own cadence as the backoff (the same pattern §7.9 already established for scan retries) — a failed send leaves `state: "pending"` and increments an internal attempt counter; the 3rd failure sets `state: "failed"` and logs at `ERROR`, which Sentry (Gate C) already captures — "alert us, not the customer."
 
 **Templates.** Plain text, sentence case, no marketing chrome. A single alert's subject is `{hostname} — {condition}`; a digest batch's subject names the count (`"3 alerts across 2 hostname(s)"`) with one line per alert in the body — actionable from a phone notification without opening the mail. Every recipient resolved from a real `AlertRecipient` row gets a personalised unsubscribe link in their copy; the `owner`/`admin` membership fallback has nothing to unsubscribe from, so gets none.
+
+### 7.11 Billing (Phase 2 Step 6)
+
+| Method | Path | Purpose | Success |
+|---|---|---|---|
+| GET | `/api/v1/billing/plans` | pricing table, in the org's currency | 200 |
+| POST | `/api/v1/billing/checkout` | start a provider checkout for a plan | 200 |
+| POST | `/api/v1/billing/webhooks/razorpay` | Razorpay event delivery | 200 |
+| POST | `/api/v1/billing/webhooks/stripe` | Stripe event delivery | 200 |
+| GET | `/api/v1/billing/subscription` | the org's current subscription, or `null` | 200 |
+| POST | `/api/v1/billing/cancel` | cancel at period end | 200 |
+| GET | `/api/v1/billing/invoices` | paginated invoice history | 200 |
+
+**Every route on this router — including the three plain `GET`s — requires `owner`.** §7.6 draws the line at billing itself, not at which HTTP verb touches it ("`admin` — hostnames, alerts, members; no billing"), so `admin` gets `403 FORBIDDEN` reading `/billing/plans` exactly as it would writing `/billing/cancel`. The two webhook routes are the deliberate exception: a payment provider sends no session cookie, so they authenticate by signature (below) instead of `current_user`/`current_org` and are reachable with no session at all.
+
+```json
+GET /api/v1/billing/plans
+-> 200 { "plans": [ {
+     "plan_code": "watch", "purchasable": true, "currency": "INR",
+     "monthly_amount_minor": 99900, "annual_amount_minor": 839160,
+     "hostname_limit": 25, "scan_interval_hours": 6,
+     "alert_lead_days": [60, 30, 14, 7, 3, 1], "member_limit": 3
+   }, ... ] }
+```
+`PricedPlan` — CONTRACT GAP, proposed: not a shape the phase prompt names, needed because "priced in the org's currency" (§Step 6) has to return something. One row per `PlanCode` (five, `§5.1`'s order), always — `secure`/`compliance` appear with `purchasable: false` and both amount fields `null` (never `0`, which would misread as "free") rather than omitted, so the pricing page can render a "contact us" row without a second endpoint. `annual_amount_minor` is `monthly_amount_minor × 12 × 0.7` (§5.1), rounded to the nearest minor unit — exact for every current plan/currency combination, never a guess.
+
+```json
+POST /api/v1/billing/checkout
+{ "plan_code": "watch", "interval": "monthly", "gstin": null, "place_of_supply": null }
+-> 200 { "checkout_url": "https://checkout.stripe.com/c/pay/...", "provider": "stripe", "contact_us": false }
+   200 { "checkout_url": null, "provider": null, "contact_us": true }   // plan_code is secure/compliance (§5.1)
+```
+`gstin`/`place_of_supply` are optional India tax fields (§6.13) — CONTRACT GAP, proposed: the phase prompt says to "capture and store them now" but names no endpoint that accepts them, and checkout is the only point in this step's flow where a customer and a purchase meet, so that's where they're captured. Carried through the provider's own metadata/notes fields (never a new DB row before the provider confirms anything) and copied onto every `Invoice` created against the subscription that checkout produces. Provider is selected from `Organisation.currency` (`INR` → `razorpay`, else `stripe`, §6.7) — never a request field. **Webhooks are the source of truth for subscription state, not this response** (§Step 6, literally): this call never writes a `subscriptions` row itself, only asks the provider to start one; `GET /billing/subscription` stays `null` until a webhook confirms it.
+
+```json
+POST /api/v1/billing/webhooks/razorpay
+POST /api/v1/billing/webhooks/stripe
+-> 200 { "status": "ok" }
+   400 WEBHOOK_INVALID_SIGNATURE
+```
+Signature verified against the raw request body before anything is parsed as JSON (`X-Razorpay-Signature`, HMAC-SHA256; `Stripe-Signature`, `t=…,v1=…`, both against the matching `*_WEBHOOK_SECRET`, §4) — an unverified body is never read as an event. Idempotent: the provider's own event id is recorded in an internal `billing_events` table (not part of this contract) before any `subscriptions`/`invoices`/`organisations` row is touched; a replayed delivery is recognised and no-opped at `200`, same response as the first delivery, so a provider's retry-on-non-2xx behaviour can never double-apply a plan change. Applies, per event: subscription activation (`Subscription.state → "active"`, `Organisation.plan_code` set to the purchased plan), a successful charge (one new `Invoice`, `state: "paid"`), and cancellation (`Subscription.state → "cancelled"`, `Organisation.plan_code → "free"`, excess monitors quota-blocked per §7.8's downgrade rule, never deleted).
+
+```json
+GET /api/v1/billing/subscription
+-> 200 { /* Subscription, §6.12 */ }
+   200 null   // no subscription has ever been confirmed for this org (still on free, or checkout never completed)
+```
+
+```json
+POST /api/v1/billing/cancel
+-> 200 { /* Subscription, §6.12, cancel_at_period_end now true */ }
+   404 NOT_FOUND   // no active/trialing/past_due subscription to cancel
+```
+Sets `cancel_at_period_end` immediately but the provider keeps billing (and access keeps working) through `current_period_end` — "never immediate" (§Step 6) applies to the plan change, not to the flag. A separate arq cron tick (`app/worker.py`, 5-minute cadence, matching §7.9/§7.10) reverts `Organisation.plan_code` to `free` once `current_period_end` actually passes, applying the same downgrade quota-block. Idempotent: cancelling an already-`cancel_at_period_end` subscription returns it unchanged rather than erroring or re-calling the provider.
+
+```json
+GET /api/v1/billing/invoices?page=&per_page=
+-> 200 { /* PaginatedList<Invoice>, §6.14/§6.13, newest first */ }
+```
 
 ---
 
@@ -1144,3 +1209,4 @@ A phase is complete only when all of these are true:
 | 2.2 | 2026-08-14 | Phase 2 Step 3 implementation: monitored hostnames (`docs/PHASE_2_PROMPT.md` Step 3). New §7.8: the seven `/api/v1/monitors...` endpoints, closing the `QUOTA_EXCEEDED` `details` shape v2.0 deliberately deferred (`{"current", "limit", "plan_code", "upgrade_to"}`, the last read from `app/plans.py`'s purchasable-plan ordering, never hardcoded). `RATE_LIMITED` (§7.4) extended, not duplicated, for the new one-manual-rescan-per-monitor-per-10-minutes limit. Two scoping decisions not specified by the phase prompt, made and documented rather than left implicit: `DUPLICATE_HOSTNAME` keys on `(hostname, port)` together, not hostname alone (port 443 and 8443 are different monitoring targets, same as §10's own allowlist treats them); quota accounting counts `active`/`paused`/`verification_pending` monitors only, so a `quota_blocked` monitor doesn't count against the very quota it's blocked by. `POST /api/v1/monitors` and `/monitors/bulk` reuse §7.2/§10 exactly as `POST /api/v1/scans` does — an unresolvable hostname is still accepted (not an HTTP error, same treatment as a public scan), a `BLOCKED_TARGET` address is rejected synchronously. Internal-only additions, not part of the JSON contract: `monitored_hostnames` table, a nullable `scans.monitor_id` FK (set when a scan is enqueued on a monitor's behalf, read back by `app/monitors.py` when that scan completes to update the monitor's denormalised `last_grade`/`last_score`/`last_scanned_at` and the certificate-expiry timestamp `days_until_expiry` is derived from). |
 | 2.3 | 2026-08-14 | Phase 2 Step 4 implementation: scheduler (`docs/PHASE_2_PROMPT.md` Step 4). New §7.9: `GET /monitors/{monitor_id}/history` (`MonitorHistoryEntry`, a thin projection of `scans.monitor_id` rows — not a new §6 top-level shape) and the scheduler's own behaviour, which has no HTTP surface of its own. New §4 var `SCHEDULER_MAX_CONCURRENT_SCANS` (default `3`) — the Redis-semaphore concurrency cap `Step 4` asks for, deliberately well under `worker.py`'s `max_jobs` of `10` so scheduled scans structurally cannot starve public/manual ones (they share no budget with it at all, rather than competing for one via priority). Retry backoff (5m/30m/2h, fixed by the phase prompt) and the post-exhaustion `scan_failure` alert reuse the scheduler's own 5-minute polling cadence as the retry mechanism — no separate retry job. Internal-only additions, not part of the JSON contract: `monitored_hostnames.consecutive_failures` (drives the retry/alert threshold, reset to 0 on the next successful scan) and an `alert_events` table backing `AlertEvent` (§6.11) — Step 4 only *fires* a `scan_failure` row into it (`state: "pending"`); no Pydantic schema or endpoint exists for it yet, since nothing serialises it to JSON until Step 5's alert engine reads it, and adding one ahead of that would be exactly the "generated but not yet defined" drift rule 9 exists to prevent. `app/scheduler.py`'s scan-record creation was extracted into `app/monitors.py`'s `create_monitor_scan_record`, shared with Step 3's manual re-scan (`create_manual_rescan`) — one place a monitor-linked `scans` row is created, not two. |
 | 2.4 | 2026-08-14 | Phase 2 Step 5 implementation: alert engine (`docs/PHASE_2_PROMPT.md` Step 5). New §5 enum `DigestMode` (not named by the phase prompt's enum list — `Organisation.digest_mode` needs a closed set for "immediate or daily digest"). §6.7 `Organisation` gains the five alert-preference fields v2.0's amendment note flagged as this step's own concern (`timezone`, `quiet_hours_start`, `quiet_hours_end`, `digest_mode`, `digest_hour`) — every org gets a working default the day it's created. New §7.10: the one HTTP endpoint this step adds (`GET /alerts/unsubscribe/{recipient_id}`, deliberately a bare `GET` so an email link works with no session), and the engine's behaviour — triggers, dedupe, quiet hours, digest batching, delivery/retry. `alert_recipients` table exists (backing §6.10 `AlertRecipient`) but has no management endpoint yet; falls back to org owners/admins' emails until Step 7 ships one. `AlertEvent` (§6.11) still has no Pydantic schema — Step 5 is a *writer* of that table (alongside Step 4), not a reader; nothing serialises it to JSON until Step 7's dashboard. One interpretation beyond the phase prompt's literal text, made and documented rather than left to chance: dedupe_key's `{monitor_id}:{type}:{threshold}` shape has no time or certificate-instance component, so a purely literal "sent state never sends again" would silently suppress a genuinely new alert forever after the first one — after a renewal, a domain re-registration, or a grade recovery-then-relapse. Resolved by gating alert *creation* on a crossing check (current value newly qualifies, the previous scan's didn't) rather than "still qualifies", so the dedupe guard only ever has to catch duplicates within one still-open episode, which is what "a certificate sitting at 7 days across a flapping scan must produce exactly one email" actually asks for. |
+| 2.5 | 2026-08-17 | Phase 2 Step 6 implementation: billing (`docs/PHASE_2_PROMPT.md` Step 6). New §4 vars `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET`/`RAZORPAY_WEBHOOK_SECRET`/`STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET`, all empty by default (checkout refuses with `INTERNAL_ERROR` rather than pretending to work, same "empty = opt-in" pattern as `RESEND_API_KEY`). New §7.4 code `WEBHOOK_INVALID_SIGNATURE` (400) — CONTRACT GAP, proposed: needed for "reject unverified with 400" (§Step 6), no existing code fits. New §7.11: the seven billing endpoints, all seven owner-only including the plain `GET`s (§7.6 draws the billing line at the resource, not the verb). Two shapes not named by the phase prompt, proposed: `PricedPlan`/`BillingPlansResponse` (`GET /billing/plans`'s wire format — `secure`/`compliance` priced `null`, never `0`) and `BillingCheckoutRequest`/`BillingCheckoutResponse` (`contact_us: true` for the two non-purchasable plans, `checkout_url`/`provider` both `null` in that case). `Subscription`/`Invoice` (§6.12/§6.13) get their first Pydantic schema and `subscriptions`/`invoices` SQLAlchemy tables — the shapes themselves are unchanged from v2.0. Interpretive decisions made and documented rather than left implicit: (1) `POST /checkout` never writes a `subscriptions` row itself — only a confirming webhook does — so "webhooks are the source of truth, not the checkout redirect" holds structurally, not just as a stated intention; (2) `gstin`/`place_of_supply` (§6.13, no capture point named by the phase prompt) are captured as optional `POST /checkout` fields, carried through the provider's own metadata/notes, and copied onto every `Invoice` a confirmed subscription later produces; (3) a Razorpay checkout creates a fresh Razorpay Plan object per attempt rather than caching one, since caching would need a new persisted mapping this step has no other need for, and Razorpay itself imposes no cost or dedup requirement on duplicate Plan objects; (4) §Step 3's "excess monitors quota-blocked oldest-first by created_at" on downgrade is implemented literally — the oldest rows are the ones blocked (the newest stay active) — reusing `app.monitors.QUOTA_COUNTED_STATES`, triggered from both the cancellation webhook and a new 5-minute arq cron (`app/worker.py`) that reverts `plan_code` to `free` once a `cancel_at_period_end` subscription's `current_period_end` actually passes. Internal-only additions, not part of the JSON contract: `billing_events` table (`(provider, event_id)` unique — the idempotency ledger "store the provider event id and skip duplicates" asks for, checked before any `subscriptions`/`invoices`/`organisations` row is touched) and `app/billing/providers.py`'s normalised `WebhookEvent`, the one shape both providers' wildly different payloads are parsed into so `app/billing/service.py` has a single code path applying state regardless of which provider sent it. |
