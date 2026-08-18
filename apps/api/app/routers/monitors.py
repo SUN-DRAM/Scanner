@@ -18,7 +18,7 @@ from app.db import get_session
 from app.deps import CurrentOrgContext, get_current_org_context, require_roles
 from app.enums import MonitorState, ScanStatus, UserRole
 from app.errors import ApiException, ErrorCode
-from app.models import MonitoredHostnameRecord, ScanRecord
+from app.models import AlertEventRecord, MonitoredHostnameRecord, ScanRecord
 from app.monitors import (
     compute_days_until_expiry,
     count_quota_monitors,
@@ -29,6 +29,7 @@ from app.ratelimit import RateLimitExceeded, enforce_monitor_scan_rate_limit
 from app.redis_client import get_arq_pool, get_redis_client
 from app.scanner.orchestrator import share_url
 from app.schemas import (
+    AlertEvent,
     MonitorBulkRequest,
     MonitorBulkResponse,
     MonitorBulkRow,
@@ -321,6 +322,58 @@ async def get_monitor_history(
         )
         for row in rows
     ]
+
+    return PaginatedList(
+        items=items,
+        page=page,
+        per_page=per_page,
+        total=total,
+        has_more=(page * per_page) < total,
+    )
+
+
+def _alert_event_to_schema(record: AlertEventRecord) -> AlertEvent:
+    return AlertEvent(
+        alert_id=str(record.alert_id),
+        org_id=str(record.org_id),
+        monitor_id=str(record.monitor_id),
+        type=record.type,  # type: ignore[arg-type]
+        state=record.state,  # type: ignore[arg-type]
+        severity=record.severity,  # type: ignore[arg-type]
+        subject=record.subject,
+        dedupe_key=record.dedupe_key,
+        scheduled_for=record.scheduled_for,
+        sent_at=record.sent_at,
+        recipients=record.recipients,
+        payload=record.payload,
+    )
+
+
+@router.get("/{monitor_id}/alerts", response_model=PaginatedList[AlertEvent])
+async def get_monitor_alerts(
+    monitor_id: str,
+    context: CurrentOrgContext = Depends(get_current_org_context),
+    session: AsyncSession = Depends(get_session),
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=25, ge=1, le=_MAX_PER_PAGE),
+) -> PaginatedList[AlertEvent]:
+    """§7.12: the alert log `/app/monitors/[id]` shows. Same cross-org
+    existence check as `get_monitor_history` before returning anything."""
+    await _get_org_monitor(session, context.org.org_id, monitor_id)
+    monitor_uuid = uuid.UUID(monitor_id)
+
+    base_stmt = select(AlertEventRecord).where(AlertEventRecord.monitor_id == monitor_uuid)
+    total = (
+        await session.execute(select(func.count()).select_from(base_stmt.subquery()))
+    ).scalar_one()
+
+    stmt = (
+        base_stmt.order_by(AlertEventRecord.scheduled_for.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    items = [_alert_event_to_schema(row) for row in rows]
 
     return PaginatedList(
         items=items,

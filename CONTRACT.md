@@ -536,7 +536,7 @@ Reuses §7.2 hostname normalisation and §10 safety guard unchanged — no paral
 }
 ```
 
-Backing table exists as of Step 5 (`alert_recipients`) and the alert engine (§7.10) resolves and delivers against whatever rows are in it, but no endpoint creates them yet — that's Step 7's `/app/alerts` settings page ("suggest a role address" is UI copy for that page, not backend logic). Until an org has added any, every `owner`/`admin` membership's email is used as a fallback, so alerts are never silently dropped for lack of a recipient.
+Backing table exists as of Step 5 (`alert_recipients`) and the alert engine (§7.10) resolves and delivers against whatever rows are in it. Step 7 (§7.12) is the first to add endpoints that create/list/delete them, for the `/app/alerts` settings page ("suggest a role address" is UI copy for that page, not backend logic). Until an org has added any, every `owner`/`admin` membership's email is used as a fallback, so alerts are never silently dropped for lack of a recipient.
 
 ### 6.11 `AlertEvent` (Phase 2)
 
@@ -556,6 +556,8 @@ Backing table exists as of Step 5 (`alert_recipients`) and the alert engine (§7
   "payload": {}               // object — template data for the email, shape is module/type-specific and not enumerated here
 }
 ```
+
+Gets its first Pydantic schema and JSON exposure in Step 7 (§7.12's `GET /monitors/{monitor_id}/alerts`) — Steps 4/5 only ever wrote this table, never serialised it.
 
 Backing table exists since Step 4 (`scan_failure` only); Step 5 (§7.10) is what actually moves `state` through `pending` → `sent`/`suppressed`/`failed` for every `AlertType`, and is the first thing that ever populates `recipients`. No Pydantic schema or endpoint exists yet — still true after Step 5, since nothing serialises this to JSON until Step 7's `/app/alerts` dashboard reads it.
 
@@ -765,7 +767,7 @@ PATCH /api/v1/orgs/current
 -> 200 Organisation (§6.7)
 ```
 
-`PATCH /api/v1/orgs/current` is scoped to `name` only — `country`/`currency` are "changeable only before the first subscription" (§Step 6) and don't belong behind a plain rename endpoint.
+`PATCH /api/v1/orgs/current` accepts `name` and, since Step 7 (§7.12), the five alert-preference fields (`timezone`, `quiet_hours_start`, `quiet_hours_end`, `digest_mode`, `digest_hour`) — every field optional, only the ones present in the request body are applied (same `model_fields_set` convention as `PATCH /monitors/{monitor_id}`, §7.8), so `/app/alerts`'s settings form has somewhere to write. `country`/`currency` are still excluded — "changeable only before the first subscription" (§Step 6) needs its own lifecycle rule and doesn't belong behind a plain field-level PATCH.
 
 `GET /api/v1/orgs/current/members` returns `PaginatedList<MembershipWithEmail>` (§6.14) — `MembershipWithEmail` is §6.8 `Membership` plus one field, `email: string`, because a member list without it isn't usable in a UI. Not a new top-level contract shape, just the obvious minimum enrichment.
 
@@ -947,6 +949,38 @@ Sets `cancel_at_period_end` immediately but the provider keeps billing (and acce
 GET /api/v1/billing/invoices?page=&per_page=
 -> 200 { /* PaginatedList<Invoice>, §6.14/§6.13, newest first */ }
 ```
+
+### 7.12 Alert recipients and the monitor alert log (Phase 2 Step 7)
+
+| Method | Path | Purpose | Success |
+|---|---|---|---|
+| GET | `/api/v1/alerts/recipients` | list the org's recipients, paginated | 200 |
+| POST | `/api/v1/alerts/recipients` | add one | 201, or 200 if already added |
+| DELETE | `/api/v1/alerts/recipients/{recipient_id}` | remove one | 204 |
+| GET | `/api/v1/monitors/{monitor_id}/alerts` | that monitor's alert history, paginated | 200 |
+
+The two `GET`s are readable by any role, including `member` (§7.6's read-only role reads alert configuration and history same as it reads monitors); `POST`/`DELETE` require `owner`/`admin`, same `_require_manage_members`-shaped dependency as `/orgs/current/members` — recipients are explicitly `admin` territory, not billing (§7.6: "admin — hostnames, alerts, members; no billing").
+
+```json
+GET /api/v1/alerts/recipients?page=&per_page=
+-> 200 { /* PaginatedList<AlertRecipient>, §6.10/§6.14 */ }
+
+POST /api/v1/alerts/recipients
+{ "email": "ops@example.com", "monitor_id": null }
+-> 201 AlertRecipient (§6.10)
+   200 AlertRecipient   // already exists for this (org, monitor_id, email) — idempotent, not a 409
+
+DELETE /api/v1/alerts/recipients/{recipient_id}
+-> 204 | 404 NOT_FOUND
+
+GET /api/v1/monitors/{monitor_id}/alerts?page=&per_page=
+-> 200 { /* PaginatedList<AlertEvent>, §6.11/§6.14, newest first */ }
+   404 NOT_FOUND
+```
+
+Two decisions not specified by the phase prompt, made and documented rather than left implicit: `POST /alerts/recipients` is idempotent on `(org_id, monitor_id, email)` — re-adding an address already on the list returns it unchanged at `200` rather than erroring, the same convention `POST /orgs/current/members` already established for re-inviting a member, so the settings page never needs to pre-check before submitting. `verified` (§6.10) is set `true` at creation, not `false` pending a confirmation flow — no email-verification mechanism is in scope anywhere in Phase 2 (the phase prompt names none, and the alert engine, §7.10, was never gated on it — `unsubscribed` is the only flag delivery actually checks), so a `false` default would just be a permanently-wrong value with nothing to ever flip it.
+
+`AlertEvent` (§6.11) gets its first Pydantic schema here — Steps 4/5 only ever wrote the table.
 
 ---
 
@@ -1210,3 +1244,4 @@ A phase is complete only when all of these are true:
 | 2.3 | 2026-08-14 | Phase 2 Step 4 implementation: scheduler (`docs/PHASE_2_PROMPT.md` Step 4). New §7.9: `GET /monitors/{monitor_id}/history` (`MonitorHistoryEntry`, a thin projection of `scans.monitor_id` rows — not a new §6 top-level shape) and the scheduler's own behaviour, which has no HTTP surface of its own. New §4 var `SCHEDULER_MAX_CONCURRENT_SCANS` (default `3`) — the Redis-semaphore concurrency cap `Step 4` asks for, deliberately well under `worker.py`'s `max_jobs` of `10` so scheduled scans structurally cannot starve public/manual ones (they share no budget with it at all, rather than competing for one via priority). Retry backoff (5m/30m/2h, fixed by the phase prompt) and the post-exhaustion `scan_failure` alert reuse the scheduler's own 5-minute polling cadence as the retry mechanism — no separate retry job. Internal-only additions, not part of the JSON contract: `monitored_hostnames.consecutive_failures` (drives the retry/alert threshold, reset to 0 on the next successful scan) and an `alert_events` table backing `AlertEvent` (§6.11) — Step 4 only *fires* a `scan_failure` row into it (`state: "pending"`); no Pydantic schema or endpoint exists for it yet, since nothing serialises it to JSON until Step 5's alert engine reads it, and adding one ahead of that would be exactly the "generated but not yet defined" drift rule 9 exists to prevent. `app/scheduler.py`'s scan-record creation was extracted into `app/monitors.py`'s `create_monitor_scan_record`, shared with Step 3's manual re-scan (`create_manual_rescan`) — one place a monitor-linked `scans` row is created, not two. |
 | 2.4 | 2026-08-14 | Phase 2 Step 5 implementation: alert engine (`docs/PHASE_2_PROMPT.md` Step 5). New §5 enum `DigestMode` (not named by the phase prompt's enum list — `Organisation.digest_mode` needs a closed set for "immediate or daily digest"). §6.7 `Organisation` gains the five alert-preference fields v2.0's amendment note flagged as this step's own concern (`timezone`, `quiet_hours_start`, `quiet_hours_end`, `digest_mode`, `digest_hour`) — every org gets a working default the day it's created. New §7.10: the one HTTP endpoint this step adds (`GET /alerts/unsubscribe/{recipient_id}`, deliberately a bare `GET` so an email link works with no session), and the engine's behaviour — triggers, dedupe, quiet hours, digest batching, delivery/retry. `alert_recipients` table exists (backing §6.10 `AlertRecipient`) but has no management endpoint yet; falls back to org owners/admins' emails until Step 7 ships one. `AlertEvent` (§6.11) still has no Pydantic schema — Step 5 is a *writer* of that table (alongside Step 4), not a reader; nothing serialises it to JSON until Step 7's dashboard. One interpretation beyond the phase prompt's literal text, made and documented rather than left to chance: dedupe_key's `{monitor_id}:{type}:{threshold}` shape has no time or certificate-instance component, so a purely literal "sent state never sends again" would silently suppress a genuinely new alert forever after the first one — after a renewal, a domain re-registration, or a grade recovery-then-relapse. Resolved by gating alert *creation* on a crossing check (current value newly qualifies, the previous scan's didn't) rather than "still qualifies", so the dedupe guard only ever has to catch duplicates within one still-open episode, which is what "a certificate sitting at 7 days across a flapping scan must produce exactly one email" actually asks for. |
 | 2.5 | 2026-08-17 | Phase 2 Step 6 implementation: billing (`docs/PHASE_2_PROMPT.md` Step 6). New §4 vars `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET`/`RAZORPAY_WEBHOOK_SECRET`/`STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET`, all empty by default (checkout refuses with `INTERNAL_ERROR` rather than pretending to work, same "empty = opt-in" pattern as `RESEND_API_KEY`). New §7.4 code `WEBHOOK_INVALID_SIGNATURE` (400) — CONTRACT GAP, proposed: needed for "reject unverified with 400" (§Step 6), no existing code fits. New §7.11: the seven billing endpoints, all seven owner-only including the plain `GET`s (§7.6 draws the billing line at the resource, not the verb). Two shapes not named by the phase prompt, proposed: `PricedPlan`/`BillingPlansResponse` (`GET /billing/plans`'s wire format — `secure`/`compliance` priced `null`, never `0`) and `BillingCheckoutRequest`/`BillingCheckoutResponse` (`contact_us: true` for the two non-purchasable plans, `checkout_url`/`provider` both `null` in that case). `Subscription`/`Invoice` (§6.12/§6.13) get their first Pydantic schema and `subscriptions`/`invoices` SQLAlchemy tables — the shapes themselves are unchanged from v2.0. Interpretive decisions made and documented rather than left implicit: (1) `POST /checkout` never writes a `subscriptions` row itself — only a confirming webhook does — so "webhooks are the source of truth, not the checkout redirect" holds structurally, not just as a stated intention; (2) `gstin`/`place_of_supply` (§6.13, no capture point named by the phase prompt) are captured as optional `POST /checkout` fields, carried through the provider's own metadata/notes, and copied onto every `Invoice` a confirmed subscription later produces; (3) a Razorpay checkout creates a fresh Razorpay Plan object per attempt rather than caching one, since caching would need a new persisted mapping this step has no other need for, and Razorpay itself imposes no cost or dedup requirement on duplicate Plan objects; (4) §Step 3's "excess monitors quota-blocked oldest-first by created_at" on downgrade is implemented literally — the oldest rows are the ones blocked (the newest stay active) — reusing `app.monitors.QUOTA_COUNTED_STATES`, triggered from both the cancellation webhook and a new 5-minute arq cron (`app/worker.py`) that reverts `plan_code` to `free` once a `cancel_at_period_end` subscription's `current_period_end` actually passes. Internal-only additions, not part of the JSON contract: `billing_events` table (`(provider, event_id)` unique — the idempotency ledger "store the provider event id and skip duplicates" asks for, checked before any `subscriptions`/`invoices`/`organisations` row is touched) and `app/billing/providers.py`'s normalised `WebhookEvent`, the one shape both providers' wildly different payloads are parsed into so `app/billing/service.py` has a single code path applying state regardless of which provider sent it. |
+| 2.6 | 2026-08-17 | Phase 2 Step 7 implementation: the customer dashboard (`docs/PHASE_2_PROMPT.md` Step 7). Closes three items earlier amendment notes explicitly deferred to this step (v2.0/v2.4's own text, not newly invented here): `PATCH /api/v1/orgs/current` gains the five alert-preference fields (`timezone`/`quiet_hours_start`/`quiet_hours_end`/`digest_mode`/`digest_hour`), all optional and only-if-present, for `/app/alerts`'s settings form; new §7.12 `GET`/`POST /alerts/recipients` and `DELETE /alerts/recipients/{recipient_id}` for the same page's recipient list (idempotent on `(org_id, monitor_id, email)`, `verified: true` at creation — no verification flow exists anywhere in Phase 2 for it to gate on, and delivery, §7.10, never checks it); and `AlertEvent` (§6.11) finally gets a Pydantic schema, read back by new §7.12 `GET /monitors/{monitor_id}/alerts` for `/app/monitors/[id]`'s alert log. All four `/alerts/recipients`/`/monitors/{id}/alerts` routes readable by every role including `member`; the two writes are `owner`/`admin` only, matching §7.6's "admin — hostnames, alerts, members" line precisely (alerts are admin territory, distinct from billing's owner-only line). No other contract-surface change — `/app`'s seven pages, the empty states, and reusing Phase 1's result components are frontend work with no API shape of their own; `robots.ts`'s `/app/` disallow (Step 0.2) is reinforced with per-page `noindex` metadata, not replaced. |

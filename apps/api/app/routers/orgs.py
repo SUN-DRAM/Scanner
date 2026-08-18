@@ -75,12 +75,26 @@ async def update_current_organisation(
     context: CurrentOrgContext = Depends(_require_manage_members),
     session: AsyncSession = Depends(get_session),
 ) -> Organisation:
-    # Scoped to `name` only, deliberately: `country`/`currency` drive billing
-    # provider selection and are "changeable only before the first
-    # subscription" (§Step 6) — a plain PATCH here isn't the right place to
-    # enforce that lifecycle rule, so those fields aren't editable through
-    # this endpoint at all yet.
-    context.org.name = payload.name
+    # Every field optional; only the keys actually present in the request
+    # are applied (§7.7/§7.12, same model_fields_set convention as
+    # MonitorUpdateRequest, routers/monitors.py). `country`/`currency` drive
+    # billing provider selection and are "changeable only before the first
+    # subscription" (§Step 6) — deliberately not on this model at all, so
+    # there's nothing here that could apply them even by accident.
+    fields_set = payload.model_fields_set
+    if "name" in fields_set and payload.name is not None:
+        context.org.name = payload.name
+    if "timezone" in fields_set and payload.timezone is not None:
+        context.org.timezone = payload.timezone
+    if "quiet_hours_start" in fields_set and payload.quiet_hours_start is not None:
+        context.org.quiet_hours_start = payload.quiet_hours_start
+    if "quiet_hours_end" in fields_set and payload.quiet_hours_end is not None:
+        context.org.quiet_hours_end = payload.quiet_hours_end
+    if "digest_mode" in fields_set and payload.digest_mode is not None:
+        context.org.digest_mode = payload.digest_mode.value
+    if "digest_hour" in fields_set and payload.digest_hour is not None:
+        context.org.digest_hour = payload.digest_hour
+
     await session.commit()
     await session.refresh(context.org)
     return _org_to_schema(context.org)

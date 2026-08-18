@@ -5,11 +5,33 @@
  */
 
 import type {
+  AlertEvent,
+  AlertRecipient,
+  AlertRecipientCreateRequest,
+  BillingCheckoutRequest,
+  BillingCheckoutResponse,
+  BillingPlansResponse,
   ErrorEnvelope,
+  Invoice,
+  MemberInviteRequest,
+  MembershipWithEmail,
   MetaDeadlines,
+  MonitorBulkRequest,
+  MonitorBulkResponse,
+  MonitorCreateRequest,
+  MonitoredHostname,
+  MonitorHistoryEntry,
+  MonitorState,
+  MonitorUpdateRequest,
+  Organisation,
+  OrgUpdateRequest,
+  OtpVerifyRequest,
+  PaginatedList,
   Scan,
   ScanCreateRequest,
   ScanCreateResponse,
+  Subscription,
+  User,
   WaitlistCreateRequest,
   WaitlistCreateResponse,
 } from "@/types/contract";
@@ -68,13 +90,38 @@ export class ScanPollTimeoutError extends Error {
   }
 }
 
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+/**
+ * `cookie` forwards the `sd_session` cookie (Phase 2 §7.6) on an
+ * authenticated call. Browser-side callers never pass it — `credentials:
+ * "include"` below already hands the browser's own cookie jar to a
+ * same-site request. Server Components can't rely on that (Node's `fetch`
+ * has no cookie jar of its own), so a page that needs authenticated data
+ * reads its own request's cookies via `next/headers` and passes the string
+ * through explicitly — kept out of this file so `next/headers` (a
+ * Server-Component-only import) never has a reason to appear in a file a
+ * "use client" component also imports.
+ */
+interface AuthedRequestOptions {
+  cookie?: string;
+}
+
+async function apiFetch<T>(
+  path: string,
+  init?: RequestInit,
+  options?: AuthedRequestOptions,
+): Promise<T> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(init?.headers as Record<string, string> | undefined),
+  };
+  if (options?.cookie) {
+    headers.Cookie = options.cookie;
+  }
+
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...init?.headers,
-    },
+    headers,
+    credentials: "include",
     cache: "no-store",
   });
 
@@ -82,7 +129,27 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     const envelope = (await response.json()) as ErrorEnvelope;
     throw new ApiRequestError(response.status, envelope);
   }
+  if (response.status === 204) {
+    return undefined as T;
+  }
   return (await response.json()) as T;
+}
+
+/** `params` is always one of this file's own `*Params` interfaces — all
+ * string/number/undefined leaves, never nested — so one cast here is safe
+ * and keeps every call site plainly typed instead of casting repeatedly. */
+function queryString(params: object): string {
+  const entries = Object.entries(params as Record<string, string | number | undefined | null>).filter(
+    (entry): entry is [string, string | number] => entry[1] !== undefined && entry[1] !== null,
+  );
+  if (entries.length === 0) return "";
+  const search = new URLSearchParams(entries.map(([key, value]) => [key, String(value)]));
+  return `?${search.toString()}`;
+}
+
+export interface PageParams {
+  page?: number;
+  per_page?: number;
 }
 
 export function createScan(request: ScanCreateRequest): Promise<ScanCreateResponse> {
@@ -109,6 +176,249 @@ export function submitWaitlist(request: WaitlistCreateRequest): Promise<Waitlist
     method: "POST",
     body: JSON.stringify(request),
   });
+}
+
+// --- 7.6/7.7 Auth & organisation (Phase 2) ---
+
+export function requestOtp(email: string): Promise<{ message: string }> {
+  return apiFetch("/api/v1/auth/otp/request", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+export function verifyOtp(request: OtpVerifyRequest): Promise<User> {
+  return apiFetch<User>("/api/v1/auth/otp/verify", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+}
+
+export function logout(): Promise<{ message: string }> {
+  return apiFetch("/api/v1/auth/logout", { method: "POST" });
+}
+
+export function getMe(cookie?: string): Promise<User> {
+  return apiFetch<User>("/api/v1/auth/me", undefined, { cookie });
+}
+
+export function getCurrentOrg(cookie?: string): Promise<Organisation> {
+  return apiFetch<Organisation>("/api/v1/orgs/current", undefined, { cookie });
+}
+
+export function updateCurrentOrg(
+  request: OrgUpdateRequest,
+  cookie?: string,
+): Promise<Organisation> {
+  return apiFetch<Organisation>(
+    "/api/v1/orgs/current",
+    { method: "PATCH", body: JSON.stringify(request) },
+    { cookie },
+  );
+}
+
+export function listMembers(
+  params: PageParams = {},
+  cookie?: string,
+): Promise<PaginatedList<MembershipWithEmail>> {
+  return apiFetch<PaginatedList<MembershipWithEmail>>(
+    `/api/v1/orgs/current/members${queryString(params)}`,
+    undefined,
+    { cookie },
+  );
+}
+
+export function inviteMember(
+  request: MemberInviteRequest,
+  cookie?: string,
+): Promise<MembershipWithEmail> {
+  return apiFetch<MembershipWithEmail>(
+    "/api/v1/orgs/current/members",
+    { method: "POST", body: JSON.stringify(request) },
+    { cookie },
+  );
+}
+
+export function removeMember(userId: string, cookie?: string): Promise<void> {
+  return apiFetch<void>(
+    `/api/v1/orgs/current/members/${encodeURIComponent(userId)}`,
+    { method: "DELETE" },
+    { cookie },
+  );
+}
+
+// --- 7.8/7.9 Monitored hostnames (Phase 2) ---
+
+export interface ListMonitorsParams extends PageParams {
+  state?: MonitorState;
+}
+
+export function listMonitors(
+  params: ListMonitorsParams = {},
+  cookie?: string,
+): Promise<PaginatedList<MonitoredHostname>> {
+  return apiFetch<PaginatedList<MonitoredHostname>>(
+    `/api/v1/monitors${queryString(params)}`,
+    undefined,
+    { cookie },
+  );
+}
+
+export function createMonitor(
+  request: MonitorCreateRequest,
+  cookie?: string,
+): Promise<MonitoredHostname> {
+  return apiFetch<MonitoredHostname>(
+    "/api/v1/monitors",
+    { method: "POST", body: JSON.stringify(request) },
+    { cookie },
+  );
+}
+
+export function getMonitor(monitorId: string, cookie?: string): Promise<MonitoredHostname> {
+  return apiFetch<MonitoredHostname>(
+    `/api/v1/monitors/${encodeURIComponent(monitorId)}`,
+    undefined,
+    { cookie },
+  );
+}
+
+export function updateMonitor(
+  monitorId: string,
+  request: MonitorUpdateRequest,
+  cookie?: string,
+): Promise<MonitoredHostname> {
+  return apiFetch<MonitoredHostname>(
+    `/api/v1/monitors/${encodeURIComponent(monitorId)}`,
+    { method: "PATCH", body: JSON.stringify(request) },
+    { cookie },
+  );
+}
+
+export function deleteMonitor(monitorId: string, cookie?: string): Promise<void> {
+  return apiFetch<void>(
+    `/api/v1/monitors/${encodeURIComponent(monitorId)}`,
+    { method: "DELETE" },
+    { cookie },
+  );
+}
+
+export function bulkCreateMonitors(
+  request: MonitorBulkRequest,
+  cookie?: string,
+): Promise<MonitorBulkResponse> {
+  return apiFetch<MonitorBulkResponse>(
+    "/api/v1/monitors/bulk",
+    { method: "POST", body: JSON.stringify(request) },
+    { cookie },
+  );
+}
+
+export function triggerManualScan(
+  monitorId: string,
+  cookie?: string,
+): Promise<ScanCreateResponse> {
+  return apiFetch<ScanCreateResponse>(
+    `/api/v1/monitors/${encodeURIComponent(monitorId)}/scan`,
+    { method: "POST" },
+    { cookie },
+  );
+}
+
+export function getMonitorHistory(
+  monitorId: string,
+  params: PageParams = {},
+  cookie?: string,
+): Promise<PaginatedList<MonitorHistoryEntry>> {
+  return apiFetch<PaginatedList<MonitorHistoryEntry>>(
+    `/api/v1/monitors/${encodeURIComponent(monitorId)}/history${queryString(params)}`,
+    undefined,
+    { cookie },
+  );
+}
+
+export function getMonitorAlerts(
+  monitorId: string,
+  params: PageParams = {},
+  cookie?: string,
+): Promise<PaginatedList<AlertEvent>> {
+  return apiFetch<PaginatedList<AlertEvent>>(
+    `/api/v1/monitors/${encodeURIComponent(monitorId)}/alerts${queryString(params)}`,
+    undefined,
+    { cookie },
+  );
+}
+
+// --- 7.12 Alert recipients (Phase 2 Step 7) ---
+
+export function listRecipients(
+  params: PageParams = {},
+  cookie?: string,
+): Promise<PaginatedList<AlertRecipient>> {
+  return apiFetch<PaginatedList<AlertRecipient>>(
+    `/api/v1/alerts/recipients${queryString(params)}`,
+    undefined,
+    { cookie },
+  );
+}
+
+export function createRecipient(
+  request: AlertRecipientCreateRequest,
+  cookie?: string,
+): Promise<AlertRecipient> {
+  return apiFetch<AlertRecipient>(
+    "/api/v1/alerts/recipients",
+    { method: "POST", body: JSON.stringify(request) },
+    { cookie },
+  );
+}
+
+export function deleteRecipient(recipientId: string, cookie?: string): Promise<void> {
+  return apiFetch<void>(
+    `/api/v1/alerts/recipients/${encodeURIComponent(recipientId)}`,
+    { method: "DELETE" },
+    { cookie },
+  );
+}
+
+// --- 7.11 Billing (Phase 2 Step 6) ---
+
+export function getBillingPlans(cookie?: string): Promise<BillingPlansResponse> {
+  return apiFetch<BillingPlansResponse>("/api/v1/billing/plans", undefined, { cookie });
+}
+
+export function createCheckout(
+  request: BillingCheckoutRequest,
+  cookie?: string,
+): Promise<BillingCheckoutResponse> {
+  return apiFetch<BillingCheckoutResponse>(
+    "/api/v1/billing/checkout",
+    { method: "POST", body: JSON.stringify(request) },
+    { cookie },
+  );
+}
+
+export function getSubscription(cookie?: string): Promise<Subscription | null> {
+  return apiFetch<Subscription | null>("/api/v1/billing/subscription", undefined, { cookie });
+}
+
+export function cancelSubscription(cookie?: string): Promise<Subscription> {
+  return apiFetch<Subscription>(
+    "/api/v1/billing/cancel",
+    { method: "POST" },
+    { cookie },
+  );
+}
+
+export function listInvoices(
+  params: PageParams = {},
+  cookie?: string,
+): Promise<PaginatedList<Invoice>> {
+  return apiFetch<PaginatedList<Invoice>>(
+    `/api/v1/billing/invoices${queryString(params)}`,
+    undefined,
+    { cookie },
+  );
 }
 
 /** Mirrors `apps/api/app/routers/health.py`'s `HealthResponse` — an ad hoc

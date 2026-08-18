@@ -10,10 +10,13 @@ from __future__ import annotations
 import re
 from datetime import date, datetime
 from typing import Annotated, Any, Generic, Literal, TypeVar
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, PlainSerializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
 
 from app.enums import (
+    AlertState,
+    AlertType,
     BillingInterval,
     BillingProvider,
     Currency,
@@ -491,15 +494,53 @@ class LogoutResponse(ContractModel):
     message: str
 
 
+_QUIET_HOURS_PATTERN = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
 class OrgUpdateRequest(ContractModel):
-    name: str
+    """PATCH body — every field optional (§7.7/§7.12). Only the keys
+    actually present in the request are applied (`routers/orgs.py` checks
+    `model_fields_set`, same convention as `MonitorUpdateRequest`), so
+    `/app/alerts`'s settings form can PATCH quiet hours without also
+    resending the org name. `country`/`currency` stay excluded — "changeable
+    only before the first subscription" (§Step 6) needs its own lifecycle
+    rule, not a plain field-level PATCH."""
+
+    name: str | None = None
+    timezone: str | None = None
+    quiet_hours_start: str | None = None
+    quiet_hours_end: str | None = None
+    digest_mode: DigestMode | None = None
+    digest_hour: int | None = Field(default=None, ge=0, le=23)
 
     @field_validator("name")
     @classmethod
-    def _validate_name(cls, value: str) -> str:
+    def _validate_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         value = value.strip()
         if not value:
             raise ValueError("Name must not be empty.")
+        return value
+
+    @field_validator("timezone")
+    @classmethod
+    def _validate_timezone(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("Not a valid IANA timezone name.") from exc
+        return value
+
+    @field_validator("quiet_hours_start", "quiet_hours_end")
+    @classmethod
+    def _validate_quiet_hours(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not _QUIET_HOURS_PATTERN.match(value):
+            raise ValueError('Must be "HH:MM" in 24-hour time.')
         return value
 
 
@@ -672,3 +713,45 @@ class BillingCheckoutResponse(ContractModel):
     checkout_url: str | None
     provider: BillingProvider | None
     contact_us: bool
+
+
+# --- 6.10/6.11 / 7.12 Alert recipients and monitor alert log (Phase 2 Step 7) ---
+
+
+class AlertRecipient(ContractModel):
+    recipient_id: str
+    org_id: str
+    monitor_id: str | None
+    email: str
+    verified: bool
+    created_at: UtcDatetime
+
+
+class AlertRecipientCreateRequest(ContractModel):
+    email: str
+    # None means org-wide (every monitor) — same convention as the §6.10
+    # shape itself, not "not supplied": this field is always meaningful.
+    monitor_id: str | None = None
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str) -> str:
+        value = value.strip()
+        if not _EMAIL_PATTERN.match(value):
+            raise ValueError("Not a valid email address.")
+        return value
+
+
+class AlertEvent(ContractModel):
+    alert_id: str
+    org_id: str
+    monitor_id: str
+    type: AlertType
+    state: AlertState
+    severity: Severity
+    subject: str
+    dedupe_key: str
+    scheduled_for: UtcDatetime
+    sent_at: UtcDatetime | None
+    recipients: list[str]
+    payload: dict[str, Any]

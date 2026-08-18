@@ -456,12 +456,20 @@ export interface OtpVerifyRequest {
 // POST /api/v1/auth/logout -> { "message": string } (200), clears it.
 // GET /api/v1/auth/me -> User (200) | 401 UNAUTHENTICATED.
 
+// Every field optional (§7.7/§7.12) — only the keys actually present are
+// applied (PATCH semantics), so the alerts settings page can send just the
+// quiet-hours fields without resending the org name.
 export interface OrgUpdateRequest {
-  name: string;
+  name?: string;
+  timezone?: string;
+  quiet_hours_start?: string;
+  quiet_hours_end?: string;
+  digest_mode?: DigestMode;
+  digest_hour?: number;
 }
 
 // GET /api/v1/orgs/current -> Organisation
-// PATCH /api/v1/orgs/current -> Organisation (OrgUpdateRequest body; name only — see CONTRACT.md §7.7)
+// PATCH /api/v1/orgs/current -> Organisation (OrgUpdateRequest body — see CONTRACT.md §7.7/§7.12)
 // GET /api/v1/orgs/current/members -> PaginatedList<MembershipWithEmail>
 
 export interface MemberInviteRequest {
@@ -629,6 +637,43 @@ export interface BillingCheckoutResponse {
   provider: BillingProvider | null;
   contact_us: boolean;
 }
+
+// --- 6.10/6.11 / 7.12 Alert recipients and monitor alert log (Phase 2 Step 7) ---
+
+export interface AlertRecipient {
+  recipient_id: string;
+  org_id: string;
+  monitor_id: string | null;
+  email: string;
+  verified: boolean;
+  created_at: string;
+}
+
+export interface AlertRecipientCreateRequest {
+  email: string;
+  monitor_id?: string | null;
+}
+
+export interface AlertEvent {
+  alert_id: string;
+  org_id: string;
+  monitor_id: string;
+  type: AlertType;
+  state: AlertState;
+  severity: Severity;
+  subject: string;
+  dedupe_key: string;
+  scheduled_for: string;
+  sent_at: string | null;
+  recipients: string[];
+  payload: Record<string, unknown>;
+}
+
+// GET /api/v1/alerts/recipients?page=&per_page= -> PaginatedList<AlertRecipient>
+// POST /api/v1/alerts/recipients -> AlertRecipient (201, or 200 if it already existed)
+// DELETE /api/v1/alerts/recipients/{recipient_id} -> 204 | 404 NOT_FOUND
+// GET /api/v1/monitors/{monitor_id}/alerts?page=&per_page= -> PaginatedList<AlertEvent>
+// All four readable by every role including member; POST/DELETE need owner/admin.
 
 // Every route below requires `owner` (§7.6/§7.11) — `admin`/`member` get
 // 403 FORBIDDEN on the plain GETs too, not just the writes.
