@@ -15,7 +15,13 @@ from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.config import get_settings
-from app.models import MonitoredHostnameRecord, OrganisationRecord, ScanRecord
+from app.models import (
+    AlertEventRecord,
+    AlertRecipientRecord,
+    MonitoredHostnameRecord,
+    OrganisationRecord,
+    ScanRecord,
+)
 from app.scheduler import _INFLIGHT_KEY, _jittered_interval, claim_due_monitors
 from tests.conftest import FakeArqPool
 
@@ -67,6 +73,17 @@ async def _clear_stale_due_monitors(db_session: AsyncSession) -> None:
     if stale_ids:
         await db_session.execute(
             delete(ScanRecord).where(ScanRecord.monitor_id.in_(stale_ids))
+        )
+        # Step 7/8 additions: AlertEventRecord (monitor_id NOT NULL) and
+        # AlertRecipientRecord (monitor-scoped recipients) both FK to
+        # monitored_hostnames too — app/commands/migrate_waitlist.py is the
+        # first thing to leave AlertRecipientRecord rows behind in bulk,
+        # which is what first exposed this cleanup as incomplete.
+        await db_session.execute(
+            delete(AlertEventRecord).where(AlertEventRecord.monitor_id.in_(stale_ids))
+        )
+        await db_session.execute(
+            delete(AlertRecipientRecord).where(AlertRecipientRecord.monitor_id.in_(stale_ids))
         )
         await db_session.execute(
             delete(MonitoredHostnameRecord).where(

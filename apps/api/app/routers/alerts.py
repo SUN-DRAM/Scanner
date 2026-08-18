@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.alerts import unsubscribe_recipient
+from app.alerts import get_or_create_recipient, unsubscribe_recipient
 from app.db import get_session
 from app.deps import CurrentOrgContext, get_current_org_context, require_roles
 from app.enums import UserRole
@@ -122,32 +122,16 @@ async def create_recipient(
                 ErrorCode.NOT_FOUND, "No monitor found.", {"monitor_id": payload.monitor_id}
             ) from exc
 
-    email = payload.email.strip().lower()
-    existing_stmt = select(AlertRecipientRecord).where(
-        AlertRecipientRecord.org_id == context.org.org_id,
-        AlertRecipientRecord.monitor_id == monitor_uuid,
-        AlertRecipientRecord.email == email,
+    record, created = await get_or_create_recipient(
+        session,
+        org_id=context.org.org_id,
+        monitor_id=monitor_uuid,
+        email=payload.email,
     )
-    existing = (await session.execute(existing_stmt)).scalar_one_or_none()
-    if existing is not None:
+    if not created:
         # Idempotent, not a conflict (§7.12) — same convention as
         # POST /orgs/current/members re-inviting an existing member.
         response.status_code = status.HTTP_200_OK
-        return _recipient_to_schema(existing)
-
-    record = AlertRecipientRecord(
-        recipient_id=uuid.uuid4(),
-        org_id=context.org.org_id,
-        monitor_id=monitor_uuid,
-        email=email,
-        # True at creation, not pending a verification flow — §7.12: no
-        # such flow exists anywhere in Phase 2, and delivery (§7.10) never
-        # gates on this flag, only on `unsubscribed`.
-        verified=True,
-    )
-    session.add(record)
-    await session.commit()
-    await session.refresh(record)
     return _recipient_to_schema(record)
 
 

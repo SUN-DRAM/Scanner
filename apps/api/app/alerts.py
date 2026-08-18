@@ -528,3 +528,44 @@ async def unsubscribe_recipient(
     recipient.unsubscribed = True
     await session.commit()
     return recipient
+
+
+async def get_or_create_recipient(
+    session: AsyncSession,
+    *,
+    org_id: uuid.UUID,
+    monitor_id: uuid.UUID | None,
+    email: str,
+) -> tuple[AlertRecipientRecord, bool]:
+    """Idempotent on `(org_id, monitor_id, email)` (§7.12) — the same
+    convention `POST /orgs/current/members` already established for
+    re-inviting an existing member. The one place an `AlertRecipient` row is
+    created — shared by `routers/alerts.py`'s `POST /alerts/recipients` and
+    `app/commands/migrate_waitlist.py` (Step 8), so re-running the waitlist
+    migration never produces a duplicate recipient. Returns `(record,
+    created)`; `created` is `False` when an existing row was returned
+    unchanged."""
+    normalized_email = email.strip().lower()
+    existing_stmt = select(AlertRecipientRecord).where(
+        AlertRecipientRecord.org_id == org_id,
+        AlertRecipientRecord.monitor_id == monitor_id,
+        AlertRecipientRecord.email == normalized_email,
+    )
+    existing = (await session.execute(existing_stmt)).scalar_one_or_none()
+    if existing is not None:
+        return existing, False
+
+    record = AlertRecipientRecord(
+        recipient_id=uuid.uuid4(),
+        org_id=org_id,
+        monitor_id=monitor_id,
+        email=normalized_email,
+        # True at creation, not pending a verification flow — §7.12: no such
+        # flow exists anywhere in Phase 2, and delivery never gates on this
+        # flag, only on `unsubscribed`.
+        verified=True,
+    )
+    session.add(record)
+    await session.commit()
+    await session.refresh(record)
+    return record, True

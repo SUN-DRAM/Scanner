@@ -92,7 +92,11 @@ async def _latest_active_code(
     return result.scalar_one_or_none()
 
 
-async def _find_or_create_user(session: AsyncSession, email: str) -> tuple[UserRecord, bool]:
+async def find_or_create_user(session: AsyncSession, email: str) -> tuple[UserRecord, bool]:
+    """The one place a `users` row is created — shared by `verify_otp` below
+    and `app/commands/migrate_waitlist.py` (Step 8), so a waitlist email that
+    already has a real account never collides with the `users.email` unique
+    constraint by going through a second, parallel creation path."""
     stmt = select(UserRecord).where(UserRecord.email == email)
     user = (await session.execute(stmt)).scalar_one_or_none()
     if user is not None:
@@ -104,7 +108,7 @@ async def _find_or_create_user(session: AsyncSession, email: str) -> tuple[UserR
     return user, True
 
 
-async def _create_personal_org(session: AsyncSession, user: UserRecord) -> None:
+async def create_personal_org(session: AsyncSession, user: UserRecord) -> OrganisationRecord:
     org = OrganisationRecord(
         org_id=uuid.uuid4(),
         # Not specified by the phase prompt: personal orgs are named from the
@@ -125,6 +129,32 @@ async def _create_personal_org(session: AsyncSession, user: UserRecord) -> None:
             invited_by=None,
         )
     )
+    return org
+
+
+async def primary_org_for_user(
+    session: AsyncSession, user_id: uuid.UUID
+) -> OrganisationRecord | None:
+    """The org whose membership the user joined first — same "current org"
+    convention as `deps.py`'s `CurrentOrgContext` (the membership earliest by
+    `joined_at`), and for a brand-new user always their personal org. Used by
+    `app/commands/migrate_waitlist.py` (Step 8) to find where an
+    already-registered waitlist email's monitor belongs, without
+    reimplementing `deps.py`'s lookup. Returns `None` only for a user with no
+    membership at all — unreachable via any login path, since `verify_otp`
+    always gives a brand-new user a personal org, but a migration script
+    reading rows that predate this system is exactly the place to check
+    rather than assume."""
+    stmt = (
+        select(MembershipRecord)
+        .where(MembershipRecord.user_id == user_id)
+        .order_by(MembershipRecord.joined_at.asc())
+        .limit(1)
+    )
+    membership = (await session.execute(stmt)).scalar_one_or_none()
+    if membership is None:
+        return None
+    return await session.get(OrganisationRecord, membership.org_id)
 
 
 async def verify_otp(
@@ -156,7 +186,7 @@ async def verify_otp(
         raise ApiException(ErrorCode.OTP_INVALID, "That code is not valid. Try again.")
 
     record.consumed_at = now
-    user, is_new_user = await _find_or_create_user(session, normalized_email)
+    user, is_new_user = await find_or_create_user(session, normalized_email)
     user.email_verified = True
     user.last_login_at = now
 
@@ -167,7 +197,7 @@ async def verify_otp(
     # invited them to an org first (§Step 2 invite flow, no separate
     # invite-token path) — must not get a second, unwanted personal org.
     if is_new_user:
-        await _create_personal_org(session, user)
+        await create_personal_org(session, user)
 
     await session.commit()
     await session.refresh(user)
