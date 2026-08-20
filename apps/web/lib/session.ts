@@ -20,7 +20,8 @@ export async function getForwardedCookie(): Promise<string> {
 }
 
 /** Redirects to /login if the request has no valid session. Every /app
- * page (via app/app/layout.tsx) goes through this once, so no individual
+ * page (via app/dashboard/layout.tsx, rewritten to /app/*) goes through this
+ * once, so no individual
  * page has to repeat the check. */
 export async function requireUser(): Promise<{ cookie: string; me: User }> {
   const cookie = await getForwardedCookie();

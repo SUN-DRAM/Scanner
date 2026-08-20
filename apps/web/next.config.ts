@@ -8,20 +8,30 @@ const nextConfig: NextConfig = {
   // its lean runtime stage — a self-contained server bundle with only the
   // dependencies actually used, not the full node_modules tree.
   output: "standalone",
-  // Gate E follow-up: production once shipped a build where `/` (app/page.tsx)
-  // and `/app` (app/app/page.tsx) resolved to the same numeric module id in
-  // the same server chunk, so the dashboard silently overwrote the homepage
-  // and every route redirect-looped to /login. Webpack's default production
-  // `moduleIds: "deterministic"` assigns short numeric ids by hashing each
-  // module's resource path — plausible to collide for two paths this close
-  // ("app/page" vs "app/app/page"). "named" uses the literal path string as
-  // the id instead, which cannot collide the same way. Named ids are
-  // slightly larger in the bundle; irrelevant next to correctness here.
+  // Gate E follow-up: production once shipped a build where `/`
+  // (app/page.tsx) rendered app/app/page.tsx's dashboard instead — every
+  // route redirect-looped to /login. Root cause: Next's app-router tree
+  // builder, in this exact build pipeline, mis-resolved routes when a
+  // segment folder was literally named "app" directly inside the App
+  // Router's own "app" root (self-nested same-name directory) — confirmed
+  // by renaming apps/web/app/app -> apps/web/app/dashboard, which alone
+  // fixed it. The rewrite below keeps the public URL at /app/* unchanged.
+  // `moduleIds: "named"` is kept alongside as defense in depth — it forces
+  // webpack's production module ids to be the literal resource path string
+  // instead of a short numeric hash, which independently ruled out one way
+  // two close paths could ever share an id, even though the folder rename
+  // turned out to be the fix that actually mattered here.
   webpack: (config, { isServer }) => {
     if (isServer) {
       config.optimization.moduleIds = "named";
     }
     return config;
+  },
+  async rewrites() {
+    return [
+      { source: "/app", destination: "/dashboard" },
+      { source: "/app/:path*", destination: "/dashboard/:path*" },
+    ];
   },
 };
 
