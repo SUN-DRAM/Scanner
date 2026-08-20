@@ -35,8 +35,8 @@ function QuotaBanner({ details }: { details: QuotaDetails }) {
   return (
     <div className="rounded-card border border-line bg-cobalt-soft p-4 text-sm text-ink">
       <p>
-        You&apos;ve reached your <span className="font-medium">{details.plan_code}</span> plan
-        &apos;s limit of {details.limit} hostnames ({details.current} in use).
+        You&apos;ve reached your <span className="font-medium">{details.plan_code}</span> plan&apos;s
+        limit of {details.limit} hostnames ({details.current} in use).
       </p>
       {details.upgrade_to ? (
         <Link href="/app/billing" className="mt-2 inline-block font-medium text-cobalt hover:underline">

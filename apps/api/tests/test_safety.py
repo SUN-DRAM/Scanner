@@ -84,6 +84,17 @@ def test_normalize_hostname_rejects_label_over_63_chars() -> None:
     assert exc_info.value.code == ErrorCode.INVALID_HOSTNAME
 
 
+def test_normalize_hostname_error_truncates_a_pathologically_long_input() -> None:
+    # A 300-char pasted string must not come back verbatim in the error —
+    # that blew out the report page's layout in production (Gate E).
+    pathological = "a" * 300 + ".com"
+    with pytest.raises(ApiException) as exc_info:
+        normalize_hostname(pathological, None)
+    assert exc_info.value.code == ErrorCode.INVALID_HOSTNAME
+    assert len(exc_info.value.message) < 120
+    assert exc_info.value.message.endswith("…' is not a valid hostname.")
+
+
 # --- §10 rule 3: port allowlist ---
 
 

@@ -31,6 +31,17 @@ from app.errors import ApiException, ErrorCode
 
 _LABEL_PATTERN = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 _SCHEME_PREFIXES = ("https://", "http://")
+_DISPLAY_HOSTNAME_MAX = 80
+
+
+def _display_hostname(raw_hostname: str) -> str:
+    """Caps how much of an invalid hostname the error message echoes back —
+    an unbounded raw string here (a pathological pasted input, hundreds of
+    chars) breaks the report layout and the share-card. Truncated for
+    display only; validation itself still runs against the full value."""
+    if len(raw_hostname) <= _DISPLAY_HOSTNAME_MAX:
+        return raw_hostname
+    return raw_hostname[:_DISPLAY_HOSTNAME_MAX] + "…"
 
 
 @dataclass(frozen=True)
@@ -82,17 +93,21 @@ def normalize_hostname(raw_hostname: str, requested_port: int | None) -> Normali
     except (idna.IDNAError, UnicodeError, ValueError) as exc:
         raise ApiException(
             ErrorCode.INVALID_HOSTNAME,
-            f"'{raw_hostname}' is not a valid hostname.",
+            f"'{_display_hostname(raw_hostname)}' is not a valid hostname.",
             {"reason": str(exc)},
         ) from exc
 
     # 6. Validate: 1-253 chars, at least one dot, labels 1-63 chars.
     if not (1 <= len(value) <= 253) or "." not in value:
-        raise ApiException(ErrorCode.INVALID_HOSTNAME, f"'{raw_hostname}' is not a valid hostname.")
+        raise ApiException(
+            ErrorCode.INVALID_HOSTNAME,
+            f"'{_display_hostname(raw_hostname)}' is not a valid hostname.",
+        )
     for label in value.split("."):
         if not (1 <= len(label) <= 63) or not _LABEL_PATTERN.match(label):
             raise ApiException(
-                ErrorCode.INVALID_HOSTNAME, f"'{raw_hostname}' is not a valid hostname."
+                ErrorCode.INVALID_HOSTNAME,
+                f"'{_display_hostname(raw_hostname)}' is not a valid hostname.",
             )
 
     resolved_port = requested_port if requested_port is not None else (embedded_port or 443)
