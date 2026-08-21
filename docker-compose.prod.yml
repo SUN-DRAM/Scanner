@@ -184,7 +184,12 @@ services:
           memory: 512M
 
   caddy:
-    image: caddy:2-alpine
+    # Pinned, not the floating 2-alpine tag — that tag silently picked up
+    # v2.11.4 on a routine container recreation and broke on stricter
+    # Caddyfile validation (rejecting `tls $EMAIL { issuer ... }`, tolerated
+    # by whatever version ran before), taking the site down with no code or
+    # config change on our side. Bump deliberately, not by surprise.
+    image: caddy:2.11.4-alpine
     restart: unless-stopped
     dns: [172.30.0.10, 1.1.1.1, 8.8.8.8]
     env_file:
