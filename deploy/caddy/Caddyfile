@@ -20,7 +20,7 @@
 }
 
 www.sundram.tech {
-	tls {$CADDY_EMAIL} {
+	tls {
 		issuer acme {
 			dir https://acme-v02.api.letsencrypt.org/directory
 		}
@@ -30,7 +30,7 @@ www.sundram.tech {
 }
 
 sundram.tech {
-	tls {$CADDY_EMAIL} {
+	tls {
 		issuer acme {
 			dir https://acme-v02.api.letsencrypt.org/directory
 		}
