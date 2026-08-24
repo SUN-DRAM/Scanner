@@ -1,10 +1,9 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 
-import { logout } from "@/lib/api";
+import { SignOutButton } from "@/components/layout/SignOutButton";
 import { cn } from "@/lib/format";
 
 const NAV_LINKS = [
@@ -25,18 +24,6 @@ interface DashboardShellProps {
  * nav §Step 7's seven pages share. */
 export function DashboardShell({ orgName, email, children }: DashboardShellProps) {
   const pathname = usePathname();
-  const router = useRouter();
-  const [signingOut, setSigningOut] = useState(false);
-
-  async function handleSignOut() {
-    setSigningOut(true);
-    try {
-      await logout();
-    } finally {
-      router.push("/login");
-      router.refresh();
-    }
-  }
 
   return (
     <div>
@@ -66,14 +53,7 @@ export function DashboardShell({ orgName, email, children }: DashboardShellProps
             <span className="hidden sm:inline">
               <span className="font-medium text-ink">{orgName}</span> · {email}
             </span>
-            <button
-              type="button"
-              onClick={handleSignOut}
-              disabled={signingOut}
-              className="font-medium text-ink-muted hover:text-ink hover:underline disabled:opacity-50"
-            >
-              {signingOut ? "Signing out…" : "Sign out"}
-            </button>
+            <SignOutButton />
           </div>
         </div>
       </div>
