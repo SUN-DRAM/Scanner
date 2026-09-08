@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
 
 from app.enums import (
+    AccountHealth,
     AlertState,
     AlertType,
     BillingInterval,
@@ -755,3 +756,205 @@ class AlertEvent(ContractModel):
     sent_at: UtcDatetime | None
     recipients: list[str]
     payload: dict[str, Any]
+
+
+# --- 7.13 Admin surface (internal, contract v2.8) ---
+#
+# Read-models for the operator console. Not customer-facing. Defined inline
+# here per the same precedent as MembershipWithEmail (§7.7) and PricedPlan
+# (§7.11); mirrored in apps/web/types/contract.ts.
+
+
+class AdminAccountRow(ContractModel):
+    """§7.13 `GET /api/v1/admin/accounts` row. Every derived string
+    (`signed_up_relative`, `last_login_relative`) is authored server-side
+    (rule 2); the frontend prints it as-is."""
+
+    org_id: str
+    name: str
+    primary_email: str
+    plan_code: PlanCode
+    created_at: UtcDatetime
+    signed_up_relative: str
+    hostname_count: int
+    hostname_limit: int | None
+    last_login_at: UtcDatetime | None
+    last_login_relative: str | None
+    last_scan_at: UtcDatetime | None
+    worst_grade: Grade | None
+    soonest_expiry_at: UtcDatetime | None
+    soonest_expiry_days: int | None
+    alerts_sent_count: int
+    health: AccountHealth
+    is_paying: bool
+
+
+class AdminScans24h(ContractModel):
+    completed: int
+    failed: int
+    queued: int
+    running: int
+    stuck: int
+
+
+class AdminSchedulerStatus(ContractModel):
+    monitors_due: int
+    monitors_overdue: int
+    monitors_overdue_1h: int
+    last_successful_run_at: UtcDatetime | None
+
+
+class AdminAlertQueueStatus(ContractModel):
+    pending: int
+    failed_24h: int
+
+
+class AdminWorkerStatus(ContractModel):
+    queue_depth: int
+    # Null = "unknown" (§7.13): not portably obtainable from inside the API
+    # process, never guessed.
+    memory_mb: int | None
+
+
+class AdminHealthReport(ContractModel):
+    """§7.13 `GET /api/v1/admin/health`."""
+
+    generated_at: UtcDatetime
+    scans_24h: AdminScans24h
+    scheduler: AdminSchedulerStatus
+    alert_queue: AdminAlertQueueStatus
+    worker: AdminWorkerStatus
+    redis: Literal["ok", "error"]
+    postgres: Literal["ok", "error"]
+
+
+class AdminAlertRow(AlertEvent):
+    """§7.13: `AlertEvent` (§6.11) plus the resolved monitor hostname, so
+    the admin alert-delivery panel is readable without a per-row lookup.
+    Same "shape plus one field" pattern as `MembershipWithEmail` (§7.7)."""
+
+    monitor_hostname: str
+
+
+class AdminScanRow(ContractModel):
+    """§7.13: a thin projection of a `scans` row for the account-detail
+    scan history — the shareable link is included so the operator can paste
+    it straight into an outreach email."""
+
+    scan_id: str
+    public_slug: str
+    hostname: str
+    status: ScanStatus
+    grade: Grade | None
+    score: int | None
+    created_at: UtcDatetime
+    share_url: str
+
+
+class AdminAccountDetail(ContractModel):
+    """§7.13 `GET /api/v1/admin/accounts/{org_id}` — one organisation in
+    full. `failed_alerts` is a distinct top-level array (not filtered out of
+    `recent_alerts`) so the frontend can surface delivery failures at the
+    top of the page: a failed alert means the customer thinks they're
+    covered and isn't."""
+
+    org: Organisation
+    members: list[MembershipWithEmail]
+    subscription: Subscription | None
+    invoices: list[Invoice]
+    monitors: list[MonitoredHostname]
+    failed_alerts: list[AdminAlertRow]
+    recent_alerts: list[AdminAlertRow]
+    recent_scans: list[AdminScanRow]
+
+
+class AdminFunnelPoint(ContractModel):
+    date: IsoDate
+    value: int
+
+
+class AdminFunnelSeries(ContractModel):
+    scans_total: list[AdminFunnelPoint]
+    # "logged-in" = the scan ran on behalf of an account's monitor
+    # (scans.monitor_id non-null); "anonymous" = the public scan box.
+    # Documented approximation, §7.13.
+    scans_anonymous: list[AdminFunnelPoint]
+    scans_logged_in: list[AdminFunnelPoint]
+    unique_hostnames: list[AdminFunnelPoint]
+    waitlist_signups: list[AdminFunnelPoint]
+
+
+class AdminFunnelRates(ContractModel):
+    # Each is null when its denominator is 0 over the window — never a guess.
+    scan_to_waitlist: float | None
+    waitlist_to_account: float | None
+    account_to_activation: float | None
+    account_to_paid: float | None
+
+
+class AdminFunnelReport(ContractModel):
+    """§7.13 `GET /api/v1/admin/funnel` — the Phase 1 acquisition path,
+    30 daily points per series plus window-wide conversion rates."""
+
+    generated_at: UtcDatetime
+    days: int
+    series: AdminFunnelSeries
+    rates: AdminFunnelRates
+
+
+class ProspectBatchCreateRequest(ContractModel):
+    label: str
+    hostnames: list[str]
+
+    @field_validator("label")
+    @classmethod
+    def _validate_label(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("A label is required.")
+        return value
+
+    @field_validator("hostnames")
+    @classmethod
+    def _validate_hostnames(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("At least one hostname is required.")
+        if len(value) > 500:
+            raise ValueError("At most 500 hostnames per batch.")
+        return value
+
+
+class AdminProspectItem(ContractModel):
+    """§7.13. One row of a prospect batch. `accepted: false` rows are only
+    ever present in the `POST` response (the rejection is a creation-time
+    concern) — `GET .../{batch_id}` returns accepted rows only."""
+
+    hostname: str
+    accepted: bool
+    reason_code: ErrorCode | None
+    scan_id: str | None
+    public_slug: str | None
+    share_url: str | None
+    status: ScanStatus | None
+    grade: Grade | None
+    days_to_expiry: int | None
+    cert_lifetime_days: int | None
+
+
+class AdminProspectBatchRow(ContractModel):
+    """§7.13 `GET /api/v1/admin/prospects` row (the detail below, minus
+    `items`). Counts are over accepted hostnames only."""
+
+    batch_id: str
+    label: str
+    created_at: UtcDatetime
+    hostname_count: int
+    scans_completed: int
+    scans_pending: int
+    worst_grade: Grade | None
+    expiring_60d_count: int
+    over_200day_lifetime_count: int
+
+
+class AdminProspectBatchDetail(AdminProspectBatchRow):
+    items: list[AdminProspectItem]

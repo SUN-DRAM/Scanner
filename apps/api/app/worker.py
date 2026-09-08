@@ -15,6 +15,7 @@ from typing import Any
 from arq import cron
 from arq.connections import RedisSettings
 
+from app.admin.digest import send_admin_digest
 from app.alerts import deliver_pending_alerts
 from app.billing.service import expire_due_cancellations
 from app.config import get_settings
@@ -62,6 +63,15 @@ async def expire_subscriptions_tick(_ctx: dict[str, Any]) -> None:
         await expire_due_cancellations(session)
 
 
+async def admin_digest_tick(_ctx: dict[str, Any]) -> None:
+    """§7.13: the daily internal digest, once a day at 02:30 UTC
+    (08:00 Asia/Kolkata). No-op when `ADMIN_DIGEST_EMAIL` is unset."""
+    sessionmaker = get_sessionmaker()
+    email_sender = get_email_sender(get_settings())
+    async with sessionmaker() as session:
+        await send_admin_digest(session, email_sender)
+
+
 class WorkerSettings:
     functions = (run_scan_job,)
     # §Step 4: "An arq cron job every 5 minutes claiming due monitors and
@@ -77,7 +87,9 @@ class WorkerSettings:
     # pattern, not a real signature mismatch.
     _alerts_cron_job = cron(deliver_alerts_tick, minute=_EVERY_FIVE_MINUTES)  # type: ignore[arg-type]
     _billing_cron_job = cron(expire_subscriptions_tick, minute=_EVERY_FIVE_MINUTES)  # type: ignore[arg-type]
-    cron_jobs = [_scheduler_cron_job, _alerts_cron_job, _billing_cron_job]
+    # §7.13: once a day, 02:30 UTC = 08:00 Asia/Kolkata.
+    _digest_cron_job = cron(admin_digest_tick, hour={2}, minute={30})  # type: ignore[arg-type]
+    cron_jobs = [_scheduler_cron_job, _alerts_cron_job, _billing_cron_job, _digest_cron_job]
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     # Comfortably above SCAN_TIMEOUT_SECONDS so the orchestrator's own
     # whole-scan budget (§10 rule 5) is always what actually cuts a stuck

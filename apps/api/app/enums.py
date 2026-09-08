@@ -158,3 +158,20 @@ class InvoiceState(StrEnum):
 class DigestMode(StrEnum):
     IMMEDIATE = "immediate"
     DIGEST = "digest"
+
+
+# --- Admin dashboard additions (contract v2.8) ---
+
+
+class AccountHealth(StrEnum):
+    """Contract §7.13, admin surface only — never in a customer-facing
+    response. Computed in app/admin/health.py from AT_RISK_LOGIN_SILENCE_DAYS
+    / DORMANT_LOGIN_SILENCE_DAYS with the precedence documented there.
+    "paying" is not a value: a paid account is the separate `is_paying`
+    boolean on AdminAccountRow, so a paying-but-quiet customer still reads
+    as at_risk/dormant in the Health column."""
+
+    ACTIVATED = "activated"
+    STALLED = "stalled"
+    AT_RISK = "at_risk"
+    DORMANT = "dormant"

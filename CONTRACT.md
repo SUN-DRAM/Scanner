@@ -158,6 +158,7 @@ RAZORPAY_KEY_SECRET=                # Paired with RAZORPAY_KEY_ID — Basic-auth
 RAZORPAY_WEBHOOK_SECRET=            # HMAC-SHA256 key verifying X-Razorpay-Signature on POST /api/v1/billing/webhooks/razorpay.
 STRIPE_SECRET_KEY=                  # Phase 2 Step 6 (§7.11). USD checkout/webhooks. Empty = Stripe checkout refuses with INTERNAL_ERROR the same way.
 STRIPE_WEBHOOK_SECRET=              # Verifies the Stripe-Signature header on POST /api/v1/billing/webhooks/stripe.
+ADMIN_DIGEST_EMAIL=                 # Admin dashboard v2.8 (§7.13). Sole recipient of the daily internal digest. Empty = the digest cron computes and sends nothing (same "empty = opt-in" pattern as RESEND_API_KEY). Delivery still requires RESEND_API_KEY/EMAIL_FROM_ADDRESS (Gate D); this only names who receives it. Send time is a code constant, 02:30 UTC / 08:00 Asia/Kolkata.
 
 # --- web ---
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
@@ -198,6 +199,9 @@ MonitorState      = "active" | "paused" | "quota_blocked" | "verification_pendin
 OtpPurpose        = "login" | "email_change"
 InvoiceState      = "open" | "paid" | "void" | "uncollectible"   // Not specified by the phase prompt's §1.1 enum list — mirrors Stripe's own state set. Signed off by the human 2026-08-14 (see §14 v2.1).
 DigestMode        = "immediate" | "digest"   // Phase 2 Step 5. Not named by the phase prompt's §1.1 enum list — Organisation.digest_mode (§6.7) needs a closed set and "immediate or daily digest" (§Step 5) is exactly two values.
+
+// --- Admin dashboard additions (v2.8) ---
+AccountHealth     = "activated" | "stalled" | "at_risk" | "dormant"   // §7.13, admin surface only — never in any customer-facing response. "paying" is deliberately not a value here: a paid account is carried as the separate boolean `is_paying` on the row, so a paying customer who has gone quiet still reads as `at_risk`/`dormant` in the Health column rather than being masked.
 ```
 
 `overall_grade` and every module `grade` use the `Grade` set. Grade colours are fixed in section 12.
@@ -982,6 +986,166 @@ Two decisions not specified by the phase prompt, made and documented rather than
 
 `AlertEvent` (§6.11) gets its first Pydantic schema here — Steps 4/5 only ever wrote the table.
 
+### 7.13 Admin surface (internal — v2.8)
+
+A read-mostly, single-operator console for cold outreach and operations. Not part of the customer product. Extends the existing `GET /api/v1/admin/stats` (§7.5), which is unchanged.
+
+**Authentication.** Every route requires the header `X-Admin-Token: <ADMIN_TOKEN>` (§4), compared with `secrets.compare_digest`. `?token=` is also accepted, for manual `curl`/browser use, matching `/admin/stats`. An empty `ADMIN_TOKEN` makes every route `403`. A missing or wrong token → `403 FORBIDDEN` with the standard §7.4 envelope — this extends `FORBIDDEN` to cover admin-token failure alongside role failure. There is no session, no `current_user`, no `current_org`: one shared operator credential, the same trust model `/admin/stats` already uses, but JSON + header rather than `text/plain` + query param.
+
+The `/admin/*` **frontend** pages hold the operator's token in an `httpOnly`, `Secure`, `SameSite=Lax` cookie named `sd_admin` (name proposed), set by a small `/admin/login` form once the token verifies against the API, and forwarded server-side as `X-Admin-Token`. The web app never contains the token itself. `/admin/*` stays out of search two ways, matching `/app/*`: `robots.ts` disallow (already present) plus per-layout `noindex` metadata.
+
+**Read-only rule.** The only non-GET routes are the two prospect-batch routes, and they write **only** to `prospect_batches` / `prospect_scans` / `scans` (§11). No admin route ever writes to `organisations`, `memberships`, `monitored_hostnames`, `subscriptions`, `invoices`, `alert_events`, or `alert_recipients`. No impersonation, no "log in as user", no session borrowing. No raw client IP is read or returned anywhere on this surface.
+
+**"Unknown", never a guess.** Any figure that cannot be computed from a query is returned as `null` and rendered "unknown" — the same rule the scanner runs under (rule 7).
+
+| Method | Path | Purpose | Success |
+|---|---|---|---|
+| GET | `/api/v1/admin/accounts` | one row per org — paginated, filterable, sortable | 200 |
+| GET | `/api/v1/admin/accounts/{org_id}` | one org in full | 200 |
+| GET | `/api/v1/admin/health` | operational status | 200 |
+| GET | `/api/v1/admin/funnel` | Phase 1 acquisition funnel, 30-day series | 200 |
+| GET | `/api/v1/admin/prospects` | prospect batches, paginated | 200 |
+| POST | `/api/v1/admin/prospects` | create a batch and enqueue its scans | 202 |
+| GET | `/api/v1/admin/prospects/{batch_id}` | one batch in full | 200 |
+| GET | `/api/v1/admin/prospects/{batch_id}/export` | CSV of the batch (`text/csv`) | 200 |
+
+A cross-entity id that doesn't exist is `404 NOT_FOUND` (§7.4). Every list route uses the §6.14 paginated envelope. Admin read-models are defined inline below (precedent: `MembershipWithEmail` §7.7, `PricedPlan` §7.11), live in `app/schemas.py`, and mirror into `types/contract.ts`.
+
+#### `AdminAccountRow` — `GET /api/v1/admin/accounts`
+
+```jsonc
+{
+  "org_id": "3a1c...",
+  "name": "Acme Inc",
+  "primary_email": "founder@example.com",       // earliest-joined owner membership
+  "plan_code": "free",                          // PlanCode
+  "created_at": "2026-09-01T10:14:03Z",
+  "signed_up_relative": "6 days ago",           // backend-authored (rule 2)
+  "hostname_count": 2,
+  "hostname_limit": 3,                           // app/plans.py, for plan_code
+  "last_login_at": "2026-09-03T08:00:00Z",      // nullable
+  "last_login_relative": "4 days ago",          // nullable, backend-authored
+  "last_scan_at": "2026-09-05T00:00:00Z",       // nullable — newest scan across the org's monitors
+  "worst_grade": "C",                           // Grade, nullable — worst last_grade across the org's monitors
+  "soonest_expiry_at": "2026-10-01T00:00:00Z",  // nullable
+  "soonest_expiry_days": 24,                     // nullable int
+  "alerts_sent_count": 4,                        // alert_events for the org in state "sent"
+  "health": "at_risk",                          // AccountHealth (§5)
+  "is_paying": false                            // subscription in active/trialing/past_due
+}
+```
+
+Query params: `plan` (PlanCode), `health` (AccountHealth), `signed_up_after` / `signed_up_before` (ISO date), `sort` = `newest` (default) | `oldest` | `last_login` | `soonest_expiry`, plus `page` / `per_page`. Returns `PaginatedList<AdminAccountRow>`.
+
+`AccountHealth` is computed in `app/admin/health.py` from named constants — `AT_RISK_LOGIN_SILENCE_DAYS = 14`, `DORMANT_LOGIN_SILENCE_DAYS = 30` — with a documented precedence, since the outreach prompt's rules overlap and the Health column holds one value:
+
+1. `dormant` — `last_login_at` is null, or older than 30 days
+2. else `at_risk` — has ≥1 hostname and `last_login_at` older than 14 days
+3. else `stalled` — zero hostnames
+4. else `activated` — has ≥1 hostname and a login on record
+
+`is_paying` is independent of `health`, so "paying customers who have gone quiet" is a reachable filter combination (`health=at_risk&plan=watch`, or client-side on `is_paying`).
+
+#### `AdminAccountDetail` — `GET /api/v1/admin/accounts/{org_id}`
+
+```jsonc
+{
+  "org": { /* Organisation, §6.7 — including the five alert-preference fields */ },
+  "members": [ /* MembershipWithEmail[], §7.7 */ ],
+  "subscription": { /* Subscription, §6.12 */ },   // nullable
+  "invoices": [ /* Invoice[], §6.13, newest first */ ],
+  "monitors": [ /* MonitoredHostname[], §6.9 — current grade & expiry already on the shape */ ],
+  "failed_alerts": [ /* AdminAlertRow[] — state "failed", surfaced first */ ],
+  "recent_alerts": [ /* AdminAlertRow[] — newest 50, any state */ ],
+  "recent_scans": [ /* AdminScanRow[] — newest 50 across the org's monitors */ ]
+}
+```
+
+`AdminAlertRow` = `AlertEvent` (§6.11) plus `monitor_hostname: string` (the resolved hostname). `AdminScanRow` = `{ scan_id, public_slug, hostname, status, grade, score, created_at, share_url }`. Failed alerts are a separate top-level array, not filtered out of `recent_alerts` — the customer thinks they're covered and isn't, so it leads the page.
+
+#### `AdminHealthReport` — `GET /api/v1/admin/health`
+
+```jsonc
+{
+  "generated_at": "2026-09-07T09:00:00Z",
+  "scans_24h":   { "completed": 812, "failed": 9, "queued": 0, "running": 1, "stuck": 0 },
+  "scheduler":   { "monitors_due": 3, "monitors_overdue": 1, "monitors_overdue_1h": 0,
+                   "last_successful_run_at": "2026-09-07T08:55:00Z" },   // nullable
+  "alert_queue": { "pending": 2, "failed_24h": 0 },
+  "worker":      { "queue_depth": 0, "memory_mb": null },   // memory_mb nullable = "unknown"
+  "redis": "ok",       // "ok" | "error"
+  "postgres": "ok"     // "ok" | "error"
+}
+```
+
+`stuck` = scans still in `queued`/`running` older than `SCAN_TIMEOUT_SECONDS` + 60s. `scheduler.last_successful_run_at` is `MAX(scans.created_at)` over scheduler-originated scans (monitor-linked, no client-IP hash — a manual re-scan carries a hash, a scheduled one doesn't) — **no new table, no heartbeat key**; derived straight from what the scheduler has actually enqueued so it can't drift, `null` → "unknown" until the first scheduled scan runs. `monitors_overdue_1h` is the figure the frontend renders in red at the top.
+
+#### `AdminFunnelReport` — `GET /api/v1/admin/funnel`
+
+```jsonc
+{
+  "generated_at": "2026-09-07T09:00:00Z",
+  "days": 30,
+  "series": {
+    "scans_total":      [ { "date": "2026-08-09", "value": 12 }, ... ],
+    "scans_anonymous":  [ ... ],
+    "scans_logged_in":  [ ... ],
+    "unique_hostnames": [ ... ],
+    "waitlist_signups": [ ... ]
+  },
+  "rates": {
+    "scan_to_waitlist":      0.041,   // nullable when the denominator is 0
+    "waitlist_to_account":   0.22,
+    "account_to_activation": 0.61,
+    "account_to_paid":       0.03
+  }
+}
+```
+
+Documented approximations (every value is still a real query, per rule 7): a scan counts as **logged-in** when `scans.monitor_id` is non-null (run on behalf of an account's monitor), **anonymous** otherwise. `unique_hostnames` is `COUNT(DISTINCT hostname)` per UTC day from `scans`. `account_to_activation` = orgs with ≥1 monitor ÷ orgs created in-window. `account_to_paid` = orgs with an `active` subscription ÷ orgs created in-window. Prospect scans (§11) are excluded from every series.
+
+#### Prospects — `GET/POST /api/v1/admin/prospects`, `GET .../{batch_id}`, `GET .../{batch_id}/export`
+
+```jsonc
+// POST /api/v1/admin/prospects   -> 202
+{ "label": "Redwing Agency portfolio", "hostnames": ["a.example.com", "b.example.com:8443"] }
+
+// AdminProspectBatchDetail  (also the POST response, and the shape GET .../{batch_id} returns)
+{
+  "batch_id": "9c2f...",
+  "label": "Redwing Agency portfolio",
+  "created_at": "2026-09-07T09:00:00Z",
+  "hostname_count": 2,
+  "scans_completed": 0,
+  "scans_pending": 2,
+  "worst_grade": null,                     // Grade, nullable until scans finish
+  "expiring_60d_count": 0,
+  "over_200day_lifetime_count": 0,
+  "items": [
+    { "hostname": "a.example.com", "accepted": true, "reason_code": null,
+      "scan_id": "8f1c...", "public_slug": "k3Xm9Qa2Rt7Z",
+      "share_url": "http://localhost:3000/scan/k3Xm9Qa2Rt7Z",
+      "status": "queued", "grade": null, "days_to_expiry": null, "cert_lifetime_days": null },
+    { "hostname": "not a host", "accepted": false, "reason_code": "INVALID_HOSTNAME",
+      "scan_id": null, "public_slug": null, "share_url": null,
+      "status": null, "grade": null, "days_to_expiry": null, "cert_lifetime_days": null }
+  ]
+}
+```
+
+`GET /api/v1/admin/prospects` returns `PaginatedList<AdminProspectBatchRow>` (the shape above minus `items`), newest first.
+
+- Hostname list: 1–500 (matches Phase 3's bulk-import ceiling). Outside that range → `422 VALIDATION_ERROR`.
+- Each hostname is normalised (§7.2) and safety-checked (§10) exactly as `POST /api/v1/scans` — no parallel path. A `BLOCKED_TARGET` address makes that row `accepted: false`; the batch still creates. A hostname repeated within one request after normalisation is `accepted: false` with `reason_code: "DUPLICATE_HOSTNAME"`.
+- `accepted: false` rows are **only** in the `POST` response — the rejection is a creation-time concern. `GET .../{batch_id}` returns accepted rows only (`prospect_scans` never stores a rejected hostname), and `hostname_count` / every count is over accepted rows.
+- Each accepted hostname creates its **own** `scans` row (scan cache bypassed, like a manual re-scan), linked through `prospect_scans`, enqueued via `run_scan_job`. `scans.monitor_id` stays `null`, so a prospect scan is structurally invisible to every org/monitor query.
+- Prospect scans do **not** increment `daily_stats` — they aren't acquisition traffic, and they never pass through `routers/scans.py` where that counter lives.
+- `GET .../{batch_id}/export` → `text/csv`, `Content-Disposition: attachment; filename="prospects-{label-slug}.csv"`, columns: `label, hostname, grade, days_to_expiry, cert_lifetime_days, share_url`.
+
+#### Daily internal digest
+
+A cron in `app/worker.py` (`admin_digest_tick`, 02:30 UTC / 08:00 Asia/Kolkata) sends one plain-text email to `ADMIN_DIGEST_EMAIL` (§4) via the Phase 2 `get_email_sender()`: for the trailing 24h — new signups, activations, hostnames added, alerts sent, alerts failed, scans stuck, monitors overdue, new paid conversions. Empty `ADMIN_DIGEST_EMAIL` → the cron computes nothing and sends nothing. No HTTP surface.
+
 ---
 
 ## 8. Finding catalogue (Phase 1, closed)
@@ -1158,7 +1322,32 @@ daily_stats (                 -- Gate B item 2. One row per UTC day, upserted in
   share_link_opens  integer not null default 0,  -- every GET /api/v1/scans/slug/{slug}, including the submitter's own first view
   waitlist_signups  integer not null default 0
 )
+
+prospect_batches (            -- Admin dashboard v2.8 (§7.13). Internal outreach tooling. Never
+  batch_id     uuid primary key,   -- customer-owned: no org_id, no user_id, no membership, no
+  label        varchar(200) not null,  -- schedule, no alerts.
+  created_at   timestamptz not null default now()
+)
+
+index prospect_batches_created_at_idx on prospect_batches (created_at desc)
+
+prospect_scans (              -- one row per hostname in a batch. The scan itself is an ordinary
+                             -- `scans` row (engine path unchanged); this table is the ONLY link
+                             -- between that scan and a batch. The linked scan keeps
+                             -- scans.monitor_id = null, so a prospect scan can never appear in any
+                             -- org- or monitor-scoped query, and is excluded from daily_stats.
+  id             uuid primary key,
+  batch_id       uuid not null references prospect_batches(batch_id) on delete cascade,
+  scan_id        uuid not null references scans(scan_id),
+  hostname       varchar(253) not null,
+  created_at     timestamptz not null default now()
+)
+
+unique (batch_id, hostname)
+index prospect_scans_batch_id_idx on prospect_scans (batch_id)
 ```
+
+`prospect_batches` / `prospect_scans` are the v2.8 admin dashboard's only schema additions. The scheduler "last successful run" figure (§7.13) is derived from `scans` (newest scheduler-originated row), not a table or a Redis key. Prospect scans are excluded from `daily_stats` and from every §7.x customer endpoint by construction (`scans.monitor_id` stays `null`, and no org owns them).
 
 The full result lives in `result` as JSONB. Top-level columns are duplicated for querying and listing only. **Raw client IPs are never stored** — DPDP hygiene starts now, not later.
 
@@ -1245,4 +1434,5 @@ A phase is complete only when all of these are true:
 | 2.4 | 2026-08-14 | Phase 2 Step 5 implementation: alert engine (`docs/PHASE_2_PROMPT.md` Step 5). New §5 enum `DigestMode` (not named by the phase prompt's enum list — `Organisation.digest_mode` needs a closed set for "immediate or daily digest"). §6.7 `Organisation` gains the five alert-preference fields v2.0's amendment note flagged as this step's own concern (`timezone`, `quiet_hours_start`, `quiet_hours_end`, `digest_mode`, `digest_hour`) — every org gets a working default the day it's created. New §7.10: the one HTTP endpoint this step adds (`GET /alerts/unsubscribe/{recipient_id}`, deliberately a bare `GET` so an email link works with no session), and the engine's behaviour — triggers, dedupe, quiet hours, digest batching, delivery/retry. `alert_recipients` table exists (backing §6.10 `AlertRecipient`) but has no management endpoint yet; falls back to org owners/admins' emails until Step 7 ships one. `AlertEvent` (§6.11) still has no Pydantic schema — Step 5 is a *writer* of that table (alongside Step 4), not a reader; nothing serialises it to JSON until Step 7's dashboard. One interpretation beyond the phase prompt's literal text, made and documented rather than left to chance: dedupe_key's `{monitor_id}:{type}:{threshold}` shape has no time or certificate-instance component, so a purely literal "sent state never sends again" would silently suppress a genuinely new alert forever after the first one — after a renewal, a domain re-registration, or a grade recovery-then-relapse. Resolved by gating alert *creation* on a crossing check (current value newly qualifies, the previous scan's didn't) rather than "still qualifies", so the dedupe guard only ever has to catch duplicates within one still-open episode, which is what "a certificate sitting at 7 days across a flapping scan must produce exactly one email" actually asks for. |
 | 2.5 | 2026-08-17 | Phase 2 Step 6 implementation: billing (`docs/PHASE_2_PROMPT.md` Step 6). New §4 vars `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET`/`RAZORPAY_WEBHOOK_SECRET`/`STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET`, all empty by default (checkout refuses with `INTERNAL_ERROR` rather than pretending to work, same "empty = opt-in" pattern as `RESEND_API_KEY`). New §7.4 code `WEBHOOK_INVALID_SIGNATURE` (400) — CONTRACT GAP, proposed: needed for "reject unverified with 400" (§Step 6), no existing code fits. New §7.11: the seven billing endpoints, all seven owner-only including the plain `GET`s (§7.6 draws the billing line at the resource, not the verb). Two shapes not named by the phase prompt, proposed: `PricedPlan`/`BillingPlansResponse` (`GET /billing/plans`'s wire format — `secure`/`compliance` priced `null`, never `0`) and `BillingCheckoutRequest`/`BillingCheckoutResponse` (`contact_us: true` for the two non-purchasable plans, `checkout_url`/`provider` both `null` in that case). `Subscription`/`Invoice` (§6.12/§6.13) get their first Pydantic schema and `subscriptions`/`invoices` SQLAlchemy tables — the shapes themselves are unchanged from v2.0. Interpretive decisions made and documented rather than left implicit: (1) `POST /checkout` never writes a `subscriptions` row itself — only a confirming webhook does — so "webhooks are the source of truth, not the checkout redirect" holds structurally, not just as a stated intention; (2) `gstin`/`place_of_supply` (§6.13, no capture point named by the phase prompt) are captured as optional `POST /checkout` fields, carried through the provider's own metadata/notes, and copied onto every `Invoice` a confirmed subscription later produces; (3) a Razorpay checkout creates a fresh Razorpay Plan object per attempt rather than caching one, since caching would need a new persisted mapping this step has no other need for, and Razorpay itself imposes no cost or dedup requirement on duplicate Plan objects; (4) §Step 3's "excess monitors quota-blocked oldest-first by created_at" on downgrade is implemented literally — the oldest rows are the ones blocked (the newest stay active) — reusing `app.monitors.QUOTA_COUNTED_STATES`, triggered from both the cancellation webhook and a new 5-minute arq cron (`app/worker.py`) that reverts `plan_code` to `free` once a `cancel_at_period_end` subscription's `current_period_end` actually passes. Internal-only additions, not part of the JSON contract: `billing_events` table (`(provider, event_id)` unique — the idempotency ledger "store the provider event id and skip duplicates" asks for, checked before any `subscriptions`/`invoices`/`organisations` row is touched) and `app/billing/providers.py`'s normalised `WebhookEvent`, the one shape both providers' wildly different payloads are parsed into so `app/billing/service.py` has a single code path applying state regardless of which provider sent it. |
 | 2.6 | 2026-08-17 | Phase 2 Step 7 implementation: the customer dashboard (`docs/PHASE_2_PROMPT.md` Step 7). Closes three items earlier amendment notes explicitly deferred to this step (v2.0/v2.4's own text, not newly invented here): `PATCH /api/v1/orgs/current` gains the five alert-preference fields (`timezone`/`quiet_hours_start`/`quiet_hours_end`/`digest_mode`/`digest_hour`), all optional and only-if-present, for `/app/alerts`'s settings form; new §7.12 `GET`/`POST /alerts/recipients` and `DELETE /alerts/recipients/{recipient_id}` for the same page's recipient list (idempotent on `(org_id, monitor_id, email)`, `verified: true` at creation — no verification flow exists anywhere in Phase 2 for it to gate on, and delivery, §7.10, never checks it); and `AlertEvent` (§6.11) finally gets a Pydantic schema, read back by new §7.12 `GET /monitors/{monitor_id}/alerts` for `/app/monitors/[id]`'s alert log. All four `/alerts/recipients`/`/monitors/{id}/alerts` routes readable by every role including `member`; the two writes are `owner`/`admin` only, matching §7.6's "admin — hostnames, alerts, members" line precisely (alerts are admin territory, distinct from billing's owner-only line). No other contract-surface change — `/app`'s seven pages, the empty states, and reusing Phase 1's result components are frontend work with no API shape of their own; `robots.ts`'s `/app/` disallow (Step 0.2) is reinforced with per-page `noindex` metadata, not replaced. |
+| 2.8 | 2026-09-07 | Admin dashboard (`docs/Admin dashboard prompt.md`): an internal, read-mostly, single-operator console for cold outreach and operations, behind the existing `ADMIN_TOKEN`. New §4 var `ADMIN_DIGEST_EMAIL` (**CONTRACT GAP**, proposed — the daily digest names no recipient otherwise; empty = opt-out, same pattern as `RESEND_API_KEY`). New §5 enum `AccountHealth` (`activated`/`stalled`/`at_risk`/`dormant`), admin-surface only, computed in `app/admin/health.py` from named constants (`AT_RISK_LOGIN_SILENCE_DAYS = 14`, `DORMANT_LOGIN_SILENCE_DAYS = 30`) with a documented precedence order since the outreach prompt's rules overlap; `paying` is deliberately not a health value — a paid account is the separate `is_paying` boolean on the row, so a paying-but-quiet customer still reads as `at_risk`/`dormant` (human sign-off in-session, 2026-09-07). New §7.13: eight `/api/v1/admin/*` routes (`accounts`, `accounts/{org_id}`, `health`, `funnel`, `prospects` ×4), gated by an `X-Admin-Token` header (`?token=` also accepted), standard JSON envelope, `FORBIDDEN` extended to cover admin-token failure alongside role failure. Read-only except the two prospect routes, which write only to `prospect_batches`/`prospect_scans`/`scans` — never a customer-owned table, no impersonation, no raw client IP. Admin read-models (`AdminAccountRow`, `AdminAccountDetail`, `AdminHealthReport`, `AdminFunnelReport`, `AdminProspectBatchRow`/`AdminProspectBatchDetail`/`AdminProspectItem`, `ProspectBatchCreateRequest`, `AdminAlertRow`, `AdminScanRow`) defined inline in §7.13 per the `MembershipWithEmail`/`PricedPlan` precedent, in `app/schemas.py`, mirrored in `types/contract.ts`. `accepted: false` prospect rows appear only in the `POST` response (rejection is creation-time); `GET .../{batch_id}` and `prospect_scans` hold accepted hostnames only. New §11 tables `prospect_batches` + `prospect_scans` — a prospect scan is an ordinary `scans` row with `monitor_id` null, linked only through `prospect_scans`, excluded from `daily_stats` and every customer endpoint by construction. `AdminHealthReport.scheduler.last_successful_run_at` is `MAX(scans.created_at)` over scheduler-originated scans (monitor-linked, no client-IP hash), not a heartbeat key — a proposed Redis-heartbeat approach was dropped when a write from inside the arq cron job proved not to persist reliably in the dev environment; the `scans`-derived value is also drift-proof. New `admin_digest_tick` cron (02:30 UTC) reuses the Phase 2 `get_email_sender()`. Documented approximations in §7.13's funnel: "logged-in scan" = `scans.monitor_id` non-null; activation/paid rates are windowed org counts. Frontend `/admin/*` holds the operator's token in an `httpOnly` `sd_admin` cookie (name proposed, human sign-off in-session), forwarded server-side — the web app never contains the token; `noindex` metadata added alongside the `robots.ts` `/admin/` disallow that already exists (no contract change for that). `CLAUDE.md`'s "we are in Phase 1" note is stale as of this amendment (the repo is post–Phase 2, contract at this version) — flagged, not fixed here. |
 | 2.7 | 2026-08-18 | Phase 2 Step 8 implementation: waitlist migration (`docs/PHASE_2_PROMPT.md` Step 8). **No contract-surface change** — the phase prompt specifies a one-off internal command, not an endpoint, so nothing here touches `schemas.py`/`contract.ts`. New `app/commands/migrate_waitlist.py`, run manually (`python -m app.commands.migrate_waitlist`), reads every `waitlist_signups` row (Gate B, §1.3) and, per signup, find-or-creates the user, creates a personal free-plan org (or reuses the existing one if the email already has a real account — the phase prompt's literal "creates the user, creates a personal org" reads as the common case, a brand-new email; an email that already has an account can't get a second one, since `users.email` is unique), adds the hostname as a monitor scoped to that org (§7.2/§10, unchanged), and adds the signup email as a monitor-scoped `AlertRecipient`, then sends the one plain-text email the phase prompt specifies, linking to `/app`. Idempotent — a rerun's `create_monitor` call hits `DUPLICATE_HOSTNAME` for a signup already migrated and skips it without resending. Two existing functions were made reusable rather than duplicated for this, matching every other step's "no parallel path" convention: `app/otp.py`'s private `_find_or_create_user`/`_create_personal_org` are now public `find_or_create_user`/`create_personal_org` (the latter now returns the created org), plus a new `primary_org_for_user` (the same "earliest-joined membership" lookup `deps.py`'s `CurrentOrgContext` already does at request time); and `routers/alerts.py`'s inline idempotent-insert logic for `POST /alerts/recipients` was extracted into `app/alerts.py`'s `get_or_create_recipient`, called by both the router and the new command. Internal-only addition, not part of the JSON contract: none — no schema changed, no table added. |

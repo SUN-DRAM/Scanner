@@ -5,6 +5,14 @@
  */
 
 import type {
+  AccountHealth,
+  AdminAccountDetail,
+  AdminAccountRow,
+  AdminAccountSort,
+  AdminFunnelReport,
+  AdminHealthReport,
+  AdminProspectBatchDetail,
+  AdminProspectBatchRow,
   AlertEvent,
   AlertRecipient,
   AlertRecipientCreateRequest,
@@ -27,6 +35,7 @@ import type {
   OrgUpdateRequest,
   OtpVerifyRequest,
   PaginatedList,
+  PlanCode,
   Scan,
   ScanCreateRequest,
   ScanCreateResponse,
@@ -103,6 +112,11 @@ export class ScanPollTimeoutError extends Error {
  */
 interface AuthedRequestOptions {
   cookie?: string;
+  /** Contract §7.13: the internal admin surface authenticates with a single
+   * shared token in the `X-Admin-Token` header, not the session cookie. The
+   * `/admin/*` pages read the operator's `sd_admin` cookie server-side and
+   * pass its value through here. */
+  adminToken?: string;
 }
 
 async function apiFetch<T>(
@@ -116,6 +130,9 @@ async function apiFetch<T>(
   };
   if (options?.cookie) {
     headers.Cookie = options.cookie;
+  }
+  if (options?.adminToken) {
+    headers["X-Admin-Token"] = options.adminToken;
   }
 
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -419,6 +436,97 @@ export function listInvoices(
     undefined,
     { cookie },
   );
+}
+
+// --- 7.13 Admin surface (internal) ---
+
+export interface ListAdminAccountsParams extends PageParams {
+  plan?: PlanCode;
+  health?: AccountHealth;
+  signed_up_after?: string;
+  signed_up_before?: string;
+  sort?: AdminAccountSort;
+}
+
+export function listAdminAccounts(
+  params: ListAdminAccountsParams,
+  adminToken: string,
+): Promise<PaginatedList<AdminAccountRow>> {
+  return apiFetch<PaginatedList<AdminAccountRow>>(
+    `/api/v1/admin/accounts${queryString(params)}`,
+    undefined,
+    { adminToken },
+  );
+}
+
+export function getAdminAccount(
+  orgId: string,
+  adminToken: string,
+): Promise<AdminAccountDetail> {
+  return apiFetch<AdminAccountDetail>(
+    `/api/v1/admin/accounts/${encodeURIComponent(orgId)}`,
+    undefined,
+    { adminToken },
+  );
+}
+
+export function getAdminHealth(adminToken: string): Promise<AdminHealthReport> {
+  return apiFetch<AdminHealthReport>("/api/v1/admin/health", undefined, { adminToken });
+}
+
+export function getAdminFunnel(adminToken: string): Promise<AdminFunnelReport> {
+  return apiFetch<AdminFunnelReport>("/api/v1/admin/funnel", undefined, { adminToken });
+}
+
+export function listAdminProspects(
+  params: PageParams,
+  adminToken: string,
+): Promise<PaginatedList<AdminProspectBatchRow>> {
+  return apiFetch<PaginatedList<AdminProspectBatchRow>>(
+    `/api/v1/admin/prospects${queryString(params)}`,
+    undefined,
+    { adminToken },
+  );
+}
+
+export function getAdminProspectBatch(
+  batchId: string,
+  adminToken: string,
+): Promise<AdminProspectBatchDetail> {
+  return apiFetch<AdminProspectBatchDetail>(
+    `/api/v1/admin/prospects/${encodeURIComponent(batchId)}`,
+    undefined,
+    { adminToken },
+  );
+}
+
+export function createAdminProspectBatch(
+  label: string,
+  hostnames: string[],
+  adminToken: string,
+): Promise<AdminProspectBatchDetail> {
+  return apiFetch<AdminProspectBatchDetail>(
+    "/api/v1/admin/prospects",
+    { method: "POST", body: JSON.stringify({ label, hostnames }) },
+    { adminToken },
+  );
+}
+
+/** Raw fetch for the CSV — the caller (a route handler) streams the body
+ * back to the browser with the download headers. */
+export async function fetchAdminProspectCsv(
+  batchId: string,
+  adminToken: string,
+): Promise<{ status: number; body: string; contentDisposition: string | null }> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v1/admin/prospects/${encodeURIComponent(batchId)}/export`,
+    { headers: { "X-Admin-Token": adminToken }, cache: "no-store" },
+  );
+  return {
+    status: response.status,
+    body: await response.text(),
+    contentDisposition: response.headers.get("content-disposition"),
+  };
 }
 
 /** Mirrors `apps/api/app/routers/health.py`'s `HealthResponse` — an ad hoc

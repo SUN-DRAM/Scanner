@@ -1,28 +1,58 @@
-"""`GET /api/v1/admin/stats` (contract §7.5, Gate B item 3).
+"""The internal admin surface (contract §7.5 and §7.13).
 
-Not a dashboard — a plain-text table, gated by a single shared token in
-`ADMIN_TOKEN`. Deliberately outside the JSON API surface: this is meant to
-be opened directly in a browser (`.../admin/stats?token=...`), not consumed
-by the frontend, so `text/plain` is the honest content type rather than
-JSON dressed up for humans.
+`GET /api/v1/admin/stats` (§7.5, Gate B) stays a plain-text table gated by
+`?token=`. Everything else here is the v2.8 dashboard: JSON, gated by the
+`X-Admin-Token` header (`?token=` also accepted), read-only except the
+prospect routes (a later step), and never touching a customer-owned table.
 """
 
 from __future__ import annotations
 
 import secrets
+from datetime import date
+from typing import Literal
 
-from fastapi import APIRouter, Depends, Query, Response
+from arq import ArqRedis
+from fastapi import APIRouter, Depends, Query, Response, status
+from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.admin.accounts import list_account_rows
+from app.admin.auth import require_admin_token
+from app.admin.detail import build_account_detail
+from app.admin.funnel import build_funnel_report
+from app.admin.ops import build_health_report
+from app.admin.prospects import (
+    create_prospect_batch,
+    get_prospect_batch_detail,
+    list_prospect_batches,
+    prospect_batch_csv,
+)
 from app.config import get_settings
 from app.db import get_session
+from app.enums import AccountHealth, PlanCode
 from app.models import DailyStatsRecord, ScanRecord
+from app.redis_client import get_arq_pool, get_redis_client
+from app.schemas import (
+    AdminAccountDetail,
+    AdminAccountRow,
+    AdminFunnelReport,
+    AdminHealthReport,
+    AdminProspectBatchDetail,
+    AdminProspectBatchRow,
+    PaginatedList,
+    ProspectBatchCreateRequest,
+)
 
 router = APIRouter(tags=["admin"])
 
 _STATS_DAYS = 30
 _RECENT_SCANS_LIMIT = 100
+_ADMIN_MAX_PER_PAGE = 100  # contract §6.14
+
+
+# --- §7.5 GET /api/v1/admin/stats (Gate B, unchanged) ---
 
 
 def _authorized(token: str | None) -> bool:
@@ -44,15 +74,11 @@ async def admin_stats(
     if not _authorized(token):
         return _forbidden()
 
-    stats_stmt = (
-        select(DailyStatsRecord).order_by(DailyStatsRecord.day.desc()).limit(_STATS_DAYS)
-    )
+    stats_stmt = select(DailyStatsRecord).order_by(DailyStatsRecord.day.desc()).limit(_STATS_DAYS)
     stats_rows = (await session.execute(stats_stmt)).scalars().all()
 
     scans_stmt = (
-        select(ScanRecord)
-        .order_by(ScanRecord.created_at.desc())
-        .limit(_RECENT_SCANS_LIMIT)
+        select(ScanRecord).order_by(ScanRecord.created_at.desc()).limit(_RECENT_SCANS_LIMIT)
     )
     scan_rows = (await session.execute(scans_stmt)).scalars().all()
 
@@ -82,3 +108,129 @@ async def admin_stats(
         lines.append("(no scans yet)")
 
     return Response(content="\n".join(lines) + "\n", media_type="text/plain")
+
+
+# --- §7.13 admin dashboard (v2.8) ---
+
+
+@router.get(
+    "/admin/accounts",
+    response_model=PaginatedList[AdminAccountRow],
+    dependencies=[Depends(require_admin_token)],
+)
+async def admin_accounts(
+    session: AsyncSession = Depends(get_session),
+    plan: PlanCode | None = Query(default=None),
+    health: AccountHealth | None = Query(default=None),
+    signed_up_after: date | None = Query(default=None),
+    signed_up_before: date | None = Query(default=None),
+    sort: Literal["newest", "oldest", "last_login", "soonest_expiry"] = Query(default="newest"),
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=25, ge=1, le=_ADMIN_MAX_PER_PAGE),
+) -> PaginatedList[AdminAccountRow]:
+    items, total = await list_account_rows(
+        session,
+        plan=plan,
+        health=health,
+        signed_up_after=signed_up_after,
+        signed_up_before=signed_up_before,
+        sort=sort,
+        page=page,
+        per_page=per_page,
+    )
+    return PaginatedList(
+        items=items,
+        page=page,
+        per_page=per_page,
+        total=total,
+        has_more=(page * per_page) < total,
+    )
+
+
+@router.get(
+    "/admin/accounts/{org_id}",
+    response_model=AdminAccountDetail,
+    dependencies=[Depends(require_admin_token)],
+)
+async def admin_account_detail(
+    org_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> AdminAccountDetail:
+    return await build_account_detail(session, org_id)
+
+
+@router.get(
+    "/admin/health",
+    response_model=AdminHealthReport,
+    dependencies=[Depends(require_admin_token)],
+)
+async def admin_health(
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis_client),
+) -> AdminHealthReport:
+    return await build_health_report(session, redis)
+
+
+@router.get(
+    "/admin/funnel",
+    response_model=AdminFunnelReport,
+    dependencies=[Depends(require_admin_token)],
+)
+async def admin_funnel(
+    session: AsyncSession = Depends(get_session),
+) -> AdminFunnelReport:
+    return await build_funnel_report(session)
+
+
+@router.get(
+    "/admin/prospects",
+    response_model=PaginatedList[AdminProspectBatchRow],
+    dependencies=[Depends(require_admin_token)],
+)
+async def admin_list_prospects(
+    session: AsyncSession = Depends(get_session),
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=25, ge=1, le=_ADMIN_MAX_PER_PAGE),
+) -> PaginatedList[AdminProspectBatchRow]:
+    return await list_prospect_batches(session, page=page, per_page=per_page)
+
+
+@router.post(
+    "/admin/prospects",
+    response_model=AdminProspectBatchDetail,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_admin_token)],
+)
+async def admin_create_prospect_batch(
+    payload: ProspectBatchCreateRequest,
+    session: AsyncSession = Depends(get_session),
+    arq_pool: ArqRedis = Depends(get_arq_pool),
+) -> AdminProspectBatchDetail:
+    return await create_prospect_batch(
+        session, arq_pool, label=payload.label, hostnames=payload.hostnames
+    )
+
+
+@router.get(
+    "/admin/prospects/{batch_id}",
+    response_model=AdminProspectBatchDetail,
+    dependencies=[Depends(require_admin_token)],
+)
+async def admin_prospect_batch_detail(
+    batch_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> AdminProspectBatchDetail:
+    return await get_prospect_batch_detail(session, batch_id)
+
+
+@router.get("/admin/prospects/{batch_id}/export", dependencies=[Depends(require_admin_token)])
+async def admin_prospect_batch_export(
+    batch_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    csv_text, filename = await prospect_batch_csv(session, batch_id)
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

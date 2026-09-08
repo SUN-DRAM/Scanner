@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from redis.asyncio import Redis
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.config import get_settings
@@ -71,6 +71,18 @@ async def _clear_stale_due_monitors(db_session: AsyncSession) -> None:
     )
     stale_ids = (await db_session.execute(stale_ids_stmt)).scalars().all()
     if stale_ids:
+        # monitored_hostnames.last_scan_id FKs to scans.scan_id, and
+        # scans.monitor_id FKs back to monitored_hostnames — a cycle. Break
+        # it by nulling last_scan_id on any monitor (stale or not) that
+        # points at a scan we're about to delete, before deleting the scans.
+        doomed_scan_ids = select(ScanRecord.scan_id).where(
+            ScanRecord.monitor_id.in_(stale_ids)
+        )
+        await db_session.execute(
+            update(MonitoredHostnameRecord)
+            .where(MonitoredHostnameRecord.last_scan_id.in_(doomed_scan_ids))
+            .values(last_scan_id=None)
+        )
         await db_session.execute(
             delete(ScanRecord).where(ScanRecord.monitor_id.in_(stale_ids))
         )

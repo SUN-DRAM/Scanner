@@ -469,3 +469,58 @@ class DailyStatsRecord(Base):
     scans_failed: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     share_link_opens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     waitlist_signups: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+
+class ProspectBatchRecord(Base):
+    """Contract §11 (amendment v2.8) — admin dashboard (§7.13) outreach
+    tooling. Never customer-owned: no org_id, no user_id, no membership, no
+    schedule, no alerts. A batch of hostnames the operator bulk-scans before
+    contacting an agency about its client portfolio."""
+
+    __tablename__ = "prospect_batches"
+
+    batch_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    label: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("prospect_batches_created_at_idx", text("created_at DESC")),
+    )
+
+
+class ProspectScanRecord(Base):
+    """Contract §11 (amendment v2.8). One row per hostname in a batch. The
+    scan itself is an ordinary `scans` row (engine path unchanged); this
+    table is the ONLY link between that scan and a batch. The linked scan
+    keeps `scans.monitor_id` null, so a prospect scan can never appear in
+    any org- or monitor-scoped query, and is excluded from `daily_stats`
+    and the §7.13 funnel by a `NOT EXISTS` against this table."""
+
+    __tablename__ = "prospect_scans"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    batch_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("prospect_batches.batch_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    scan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("scans.scan_id"), nullable=False
+    )
+    hostname: Mapped[str] = mapped_column(String(253), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "batch_id", "hostname", name="uq_prospect_scans_batch_hostname"
+        ),
+        Index("prospect_scans_batch_id_idx", "batch_id"),
+    )

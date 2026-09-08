@@ -55,6 +55,13 @@ export type InvoiceState = "open" | "paid" | "void" | "uncollectible";
 
 export type DigestMode = "immediate" | "digest";
 
+// --- Admin dashboard additions (contract v2.8) ---
+
+// §7.13, admin surface only — never in a customer-facing response. "paying"
+// is not a value: a paid account is the separate `is_paying` boolean on
+// AdminAccountRow.
+export type AccountHealth = "activated" | "stalled" | "at_risk" | "dormant";
+
 // --- error envelope (contract §7.4) ---
 
 export type ErrorCode =
@@ -684,3 +691,165 @@ export interface AlertEvent {
 // GET /api/v1/billing/subscription -> Subscription | null
 // POST /api/v1/billing/cancel -> Subscription | 404 NOT_FOUND
 // GET /api/v1/billing/invoices?page=&per_page= -> PaginatedList<Invoice>
+
+// --- 7.13 Admin surface (internal, contract v2.8) ---
+// Every route gated by the X-Admin-Token header (or ?token=). 403 FORBIDDEN
+// on a missing/invalid token. Read-only except the prospect routes.
+
+export type AdminAccountSort = "newest" | "oldest" | "last_login" | "soonest_expiry";
+
+export interface AdminAccountRow {
+  org_id: string;
+  name: string;
+  primary_email: string;
+  plan_code: PlanCode;
+  created_at: string;
+  signed_up_relative: string;
+  hostname_count: number;
+  hostname_limit: number | null;
+  last_login_at: string | null;
+  last_login_relative: string | null;
+  last_scan_at: string | null;
+  worst_grade: Grade | null;
+  soonest_expiry_at: string | null;
+  soonest_expiry_days: number | null;
+  alerts_sent_count: number;
+  health: AccountHealth;
+  is_paying: boolean;
+}
+
+export interface AdminScans24h {
+  completed: number;
+  failed: number;
+  queued: number;
+  running: number;
+  stuck: number;
+}
+
+export interface AdminSchedulerStatus {
+  monitors_due: number;
+  monitors_overdue: number;
+  monitors_overdue_1h: number;
+  last_successful_run_at: string | null;
+}
+
+export interface AdminAlertQueueStatus {
+  pending: number;
+  failed_24h: number;
+}
+
+export interface AdminWorkerStatus {
+  queue_depth: number;
+  memory_mb: number | null;
+}
+
+export interface AdminHealthReport {
+  generated_at: string;
+  scans_24h: AdminScans24h;
+  scheduler: AdminSchedulerStatus;
+  alert_queue: AdminAlertQueueStatus;
+  worker: AdminWorkerStatus;
+  redis: "ok" | "error";
+  postgres: "ok" | "error";
+}
+
+// AlertEvent (§6.11) plus the resolved monitor hostname.
+export interface AdminAlertRow extends AlertEvent {
+  monitor_hostname: string;
+}
+
+export interface AdminScanRow {
+  scan_id: string;
+  public_slug: string;
+  hostname: string;
+  status: ScanStatus;
+  grade: Grade | null;
+  score: number | null;
+  created_at: string;
+  share_url: string;
+}
+
+export interface AdminAccountDetail {
+  org: Organisation;
+  members: MembershipWithEmail[];
+  subscription: Subscription | null;
+  invoices: Invoice[];
+  monitors: MonitoredHostname[];
+  // Delivery failures — a distinct array so the UI surfaces them at the top.
+  failed_alerts: AdminAlertRow[];
+  recent_alerts: AdminAlertRow[];
+  recent_scans: AdminScanRow[];
+}
+
+export interface AdminFunnelPoint {
+  date: string;
+  value: number;
+}
+
+export interface AdminFunnelSeries {
+  scans_total: AdminFunnelPoint[];
+  scans_anonymous: AdminFunnelPoint[];
+  scans_logged_in: AdminFunnelPoint[];
+  unique_hostnames: AdminFunnelPoint[];
+  waitlist_signups: AdminFunnelPoint[];
+}
+
+export interface AdminFunnelRates {
+  // null when the denominator is 0 over the window.
+  scan_to_waitlist: number | null;
+  waitlist_to_account: number | null;
+  account_to_activation: number | null;
+  account_to_paid: number | null;
+}
+
+export interface AdminFunnelReport {
+  generated_at: string;
+  days: number;
+  series: AdminFunnelSeries;
+  rates: AdminFunnelRates;
+}
+
+export interface ProspectBatchCreateRequest {
+  label: string;
+  hostnames: string[];
+}
+
+export interface AdminProspectItem {
+  hostname: string;
+  accepted: boolean;
+  reason_code: ErrorCode | null;
+  scan_id: string | null;
+  public_slug: string | null;
+  share_url: string | null;
+  status: ScanStatus | null;
+  grade: Grade | null;
+  days_to_expiry: number | null;
+  cert_lifetime_days: number | null;
+}
+
+export interface AdminProspectBatchRow {
+  batch_id: string;
+  label: string;
+  created_at: string;
+  hostname_count: number;
+  scans_completed: number;
+  scans_pending: number;
+  worst_grade: Grade | null;
+  expiring_60d_count: number;
+  over_200day_lifetime_count: number;
+}
+
+export interface AdminProspectBatchDetail extends AdminProspectBatchRow {
+  // POST also includes accepted:false rows; GET returns accepted only.
+  items: AdminProspectItem[];
+}
+
+// GET /api/v1/admin/accounts?plan=&health=&signed_up_after=&signed_up_before=&sort=&page=&per_page=
+//   -> PaginatedList<AdminAccountRow>
+// GET /api/v1/admin/accounts/{org_id} -> AdminAccountDetail | 404 NOT_FOUND
+// GET /api/v1/admin/health -> AdminHealthReport
+// GET /api/v1/admin/funnel -> AdminFunnelReport
+// GET /api/v1/admin/prospects?page=&per_page= -> PaginatedList<AdminProspectBatchRow>
+// POST /api/v1/admin/prospects -> AdminProspectBatchDetail (202) | 422 VALIDATION_ERROR
+// GET /api/v1/admin/prospects/{batch_id} -> AdminProspectBatchDetail | 404 NOT_FOUND
+// GET /api/v1/admin/prospects/{batch_id}/export -> text/csv

@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     razorpay_webhook_secret: str = Field(default="", alias="RAZORPAY_WEBHOOK_SECRET")
     stripe_secret_key: str = Field(default="", alias="STRIPE_SECRET_KEY")
     stripe_webhook_secret: str = Field(default="", alias="STRIPE_WEBHOOK_SECRET")
+    # Admin dashboard v2.8 (§7.13). Sole recipient of the daily internal
+    # digest (app/worker.py's admin_digest_tick). Empty by default, same
+    # "empty = opt-in" pattern as resend_api_key: the digest cron computes
+    # and sends nothing until this is set. Delivery still needs
+    # resend_api_key/email_from_address configured to actually leave the box.
+    admin_digest_email: str = Field(default="", alias="ADMIN_DIGEST_EMAIL")
 
     @field_validator("cors_origins")
     @classmethod
