@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { GradeHistorySparkline } from "@/components/app/GradeHistorySparkline";
 import { MonitorActions } from "@/components/app/MonitorActions";
+import { ScanGradeHeader } from "@/components/scan/ScanGradeHeader";
 import { ScanProgress } from "@/components/scan/ScanProgress";
 import { ScanResultBody } from "@/components/scan/ScanResultBody";
 import {
@@ -142,7 +143,15 @@ export default async function MonitorDetailPage({ params }: MonitorDetailPagePro
             {scan.error?.message ?? "The last scan failed. It will retry automatically."}
           </p>
         ) : (
-          <ScanResultBody scan={scan} />
+          <>
+            <ScanGradeHeader
+              grade={scan.overall_grade}
+              score={scan.overall_score}
+              headline={scan.headline}
+              className="mb-8 border-b border-line pb-8"
+            />
+            <ScanResultBody scan={scan} />
+          </>
         )}
       </section>
     </div>

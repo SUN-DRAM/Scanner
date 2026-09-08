@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-import { SignOutButton } from "@/components/layout/SignOutButton";
 import { cn } from "@/lib/format";
 
 const NAV_LINKS = [
@@ -15,14 +14,14 @@ const NAV_LINKS = [
 
 interface DashboardShellProps {
   orgName: string;
-  email: string;
   children: React.ReactNode;
 }
 
-/** The logged-in instrument's chrome — same brand bar as the public site
- * (RootLayout's Header still renders above this), plus the app-specific
- * nav §Step 7's seven pages share. */
-export function DashboardShell({ orgName, email, children }: DashboardShellProps) {
+/** The logged-in instrument's chrome — the app-specific nav §Step 7's seven
+ * pages share, plus the current org name for context. Identity (the signed-in
+ * email) and "Sign out" live once, in RootLayout's `Header`, which renders
+ * above this on every route; they are deliberately not repeated here. */
+export function DashboardShell({ orgName, children }: DashboardShellProps) {
   const pathname = usePathname();
 
   return (
@@ -50,10 +49,7 @@ export function DashboardShell({ orgName, email, children }: DashboardShellProps
             })}
           </nav>
           <div className="ml-auto flex items-center gap-4 text-sm text-ink-muted">
-            <span className="hidden sm:inline">
-              <span className="font-medium text-ink">{orgName}</span> · {email}
-            </span>
-            <SignOutButton />
+            <span className="hidden font-medium text-ink sm:inline">{orgName}</span>
           </div>
         </div>
       </div>

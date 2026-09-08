@@ -16,11 +16,7 @@ export const metadata: Metadata = {
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   // Every /app/* route is gated here, once — redirects to /login if there's
   // no valid session, so no individual page below has to repeat the check.
-  const { me, org } = await requireOrg();
+  const { org } = await requireOrg();
 
-  return (
-    <DashboardShell orgName={org.name} email={me.email}>
-      {children}
-    </DashboardShell>
-  );
+  return <DashboardShell orgName={org.name}>{children}</DashboardShell>;
 }

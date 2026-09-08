@@ -9,6 +9,11 @@ const dirname = path.dirname(fileURLToPath(import.meta.url));
 // a route module (page.tsx/generateMetadata) that itself pulls in "@/..."
 // components or lib code, which robots.test.ts never needed to do.
 export default defineConfig({
+  // Match Next's SWC config: the automatic JSX runtime, so test files and any
+  // component modules they import don't need `React` in scope.
+  esbuild: {
+    jsx: "automatic",
+  },
   resolve: {
     alias: {
       "@": dirname,

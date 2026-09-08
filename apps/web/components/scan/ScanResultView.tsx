@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 
-import { GradeDial } from "@/components/scan/GradeDial";
+import { ScanGradeHeader } from "@/components/scan/ScanGradeHeader";
 import { ScanProgress } from "@/components/scan/ScanProgress";
 import { ScanResultBody } from "@/components/scan/ScanResultBody";
 import { WaitlistForm } from "@/components/scan/WaitlistForm";
@@ -68,12 +68,12 @@ export function ScanResultView({ initialScan }: ScanResultViewProps) {
     <main className="mx-auto max-w-content px-4 py-12">
       <section className="flex flex-col items-center gap-4 border-b border-line pb-10 text-center">
         <p className="font-mono text-sm text-ink-muted">{scan.hostname}</p>
-        {scan.overall_grade !== null && scan.overall_score !== null ? (
-          <GradeDial grade={scan.overall_grade} score={scan.overall_score} />
-        ) : null}
-        <h1 className="max-w-reading font-display text-xl leading-display text-ink sm:text-2xl">
-          {scan.headline}
-        </h1>
+        <ScanGradeHeader
+          grade={scan.overall_grade}
+          score={scan.overall_score}
+          headline={scan.headline}
+          headingLevel={1}
+        />
         <p className="font-mono text-xs text-ink-muted">
           Scanned {formatDateTimeDisplay(scannedAt)}
         </p>

@@ -1,11 +1,18 @@
-import { gradeTone } from "@/lib/format";
-import { formatDateDisplay } from "@/lib/format";
+import { formatDateDisplay, gradeTone, toneTextClass } from "@/lib/format";
 import type { MonitorHistoryEntry } from "@/types/contract";
 
 const TONE_STROKE: Record<ReturnType<typeof gradeTone>, string> = {
   pass: "#0E9F6E",
   warn: "#E4A11B",
   alert: "#D7263D",
+};
+
+/** Contract §12: colour is never the sole carrier of meaning — the dot
+ * colours are always accompanied by the current grade letter and label. */
+const TONE_LABEL: Record<ReturnType<typeof gradeTone>, string> = {
+  pass: "Pass",
+  warn: "Needs attention",
+  alert: "Action needed",
 };
 
 interface GradeHistorySparklineProps {
@@ -29,10 +36,25 @@ export function GradeHistorySparkline({
     return <p className="text-sm text-ink-muted">No completed scans yet.</p>;
   }
 
+  // Non-null: the `scored.length === 0` check above guarantees at least one entry.
+  const first = scored[0]!;
+  const last = scored[scored.length - 1]!;
+
+  // One data point is not a history — a lone dot between two identical date
+  // labels reads as a range that isn't there. State the one fact we have.
+  if (scored.length < 2) {
+    return (
+      <p className="text-sm text-ink-muted">
+        First scan {formatDateDisplay(first.scanned_at)} — history appears after the next scheduled
+        scan.
+      </p>
+    );
+  }
+
   const padding = 8;
   const plotWidth = width - padding * 2;
   const plotHeight = height - padding * 2;
-  const stepX = scored.length > 1 ? plotWidth / (scored.length - 1) : 0;
+  const stepX = plotWidth / (scored.length - 1);
 
   function pointFor(index: number, score: number): { x: number; y: number } {
     const x = padding + index * stepX;
@@ -47,12 +69,15 @@ export function GradeHistorySparkline({
     })
     .join(" ");
 
-  // Non-null: the `scored.length === 0` check above guarantees at least one entry.
-  const first = scored[0]!;
-  const last = scored[scored.length - 1]!;
+  const currentTone = last.grade !== null ? gradeTone(last.grade) : null;
 
   return (
     <div>
+      {last.grade !== null && currentTone !== null ? (
+        <p className={`mb-3 font-mono text-xs font-medium ${toneTextClass(currentTone)}`}>
+          Current grade {last.grade} · {TONE_LABEL[currentTone]}
+        </p>
+      ) : null}
       <svg viewBox={`0 0 ${width} ${height}`} className="w-full" role="img" aria-label="Grade history">
         <path d={linePath} fill="none" stroke="#E3E8ED" strokeWidth="2" />
         {scored.map((entry, index) => {
