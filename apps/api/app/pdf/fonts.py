@@ -11,6 +11,13 @@ Font files are Google Fonts (OFL-licensed) static WOFF instances — Space
 Grotesk Regular/Medium/Bold, Inter Regular/SemiBold, JetBrains Mono
 Regular/Medium — chosen to cover every weight the templates below actually
 use, no more.
+
+Playfair Display Black is a deliberate, documented exception to §12's locked
+type scale (`Space Grotesk` for display), the same pattern already used for
+the cover logo's gold colouring in `styles.py`: a human decision, made
+explicitly for the cover wordmark only, in this session (docs/PDF_FIXES.md
+polish, 2026-09-13) — not a silent drift from the design system. Nothing
+else in the PDF uses this face.
 """
 
 from __future__ import annotations
@@ -42,6 +49,7 @@ _FONT_FILES: tuple[tuple[str, int, str], ...] = (
     ("Inter", 600, "Inter-SemiBold.woff"),
     ("JetBrains Mono", 400, "JetBrainsMono-Regular.woff"),
     ("JetBrains Mono", 500, "JetBrainsMono-Medium.woff"),
+    ("Playfair Display", 900, "PlayfairDisplay-Black.woff"),
 )
 
 

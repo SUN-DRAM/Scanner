@@ -11,9 +11,11 @@ from app.grading import (
     compute_overall_grade,
     compute_overall_score,
     count_by_severity,
+    grade_cap_reason,
     grade_for_score,
     grade_module,
     grade_scan,
+    module_summary,
     score_module,
     select_headline,
     sort_findings,
@@ -99,6 +101,9 @@ def test_two_high_findings_cap_overall_at_c() -> None:
     # -> round-half-to-even -> 90
     assert result.overall_score == 90
     assert result.overall_grade == Grade.C  # would otherwise band to A
+    # PDF_FIXES.md polish: 90 bands to A — the reader must be told why the
+    # letter reads three bands worse than that.
+    assert result.grade_cap_reason == "capped by 2 high-severity findings"
 
 
 def test_complete_scan_has_is_complete_true_and_no_incomplete_modules() -> None:
@@ -334,6 +339,37 @@ def test_worst_finding_returns_none_for_empty_list() -> None:
     assert worst_finding([]) is None
 
 
+# --- module_summary (docs/PDF_FIXES.md polish: summaries led with the
+# negative — DNS graded A+ with "DNSSEC is not enabled", email auth graded
+# A+ with "No DKIM selector responded") ---
+
+
+def test_module_summary_uses_clean_state_when_there_are_no_findings() -> None:
+    assert module_summary([], "All clear.") == "All clear."
+
+
+def test_module_summary_leads_with_the_finding_for_a_real_problem() -> None:
+    finding = _finding(Severity.HIGH, ModuleName.TLS, "TLS_LEGACY_PROTOCOL")
+    assert module_summary([finding], "All clear.") == "TLS_LEGACY_PROTOCOL title."
+
+
+def test_module_summary_does_not_lead_with_an_info_only_finding() -> None:
+    # The exact bug: an info-only module (zero score deduction, still A+)
+    # must not have its summary read like a complaint.
+    finding = _finding(Severity.INFO, ModuleName.DNS, "DNS_NO_DNSSEC")
+    summary = module_summary([finding], "3 nameservers, CAA and DNSSEC both in place.")
+    assert summary == "No significant issues found. DNS_NO_DNSSEC title."
+    # Never the old behaviour — a raw info-finding title with no context.
+    assert summary != "DNS_NO_DNSSEC title."
+
+
+def test_module_summary_picks_the_worst_finding_when_info_is_mixed_with_a_real_one() -> None:
+    info = _finding(Severity.INFO, ModuleName.EMAIL_AUTH, "EMAIL_NO_DKIM_SELECTOR")
+    high = _finding(Severity.HIGH, ModuleName.EMAIL_AUTH, "EMAIL_SPF_MISSING")
+    summary = module_summary([info, high], "SPF, DMARC and DKIM all look correctly configured.")
+    assert summary == "EMAIL_SPF_MISSING title."
+
+
 # --- Gate A follow-up A4: domain-expiry findings excluded from grade caps ---
 
 
@@ -370,3 +406,69 @@ def test_domain_expiring_critical_does_not_force_its_own_module_to_f() -> None:
     finding = _finding(Severity.CRITICAL, ModuleName.DNS, "DOMAIN_EXPIRING_CRITICAL")
     score = score_module([finding])  # 100 - 45 = 55 -> bands to D
     assert grade_module(score, [finding]) == Grade.D
+
+
+# --- PDF_FIXES.md polish: grade_cap_reason ---
+
+
+def test_grade_cap_reason_is_none_when_the_letter_already_matches_the_score() -> None:
+    assert grade_cap_reason(97, []) is None
+
+
+def test_grade_cap_reason_names_the_two_high_cap() -> None:
+    findings = [
+        _finding(Severity.HIGH, ModuleName.TLS, "TLS_LEGACY_PROTOCOL"),
+        _finding(Severity.HIGH, ModuleName.HEADERS, "HSTS_MISSING"),
+    ]
+    # 82 bands to B (78-87) — the two-high cap pulls it to C.
+    assert grade_cap_reason(82, findings) == "capped by 2 high-severity findings"
+
+
+def test_grade_cap_reason_names_the_critical_cap() -> None:
+    findings = [_finding(Severity.CRITICAL, ModuleName.CERTIFICATE, "CERT_EXPIRED")]
+    # 55 bands to D — the critical cap forces F.
+    assert grade_cap_reason(55, findings) == "capped by 1 critical-severity finding"
+
+
+def test_grade_cap_reason_pluralises_multiple_critical_findings() -> None:
+    findings = [
+        _finding(Severity.CRITICAL, ModuleName.CERTIFICATE, "CERT_EXPIRED"),
+        _finding(Severity.CRITICAL, ModuleName.CHAIN, "CHAIN_UNTRUSTED_ROOT"),
+    ]
+    assert grade_cap_reason(55, findings) == "capped by 2 critical-severity findings"
+
+
+def test_grade_cap_reason_credits_the_critical_cap_over_the_two_high_cap() -> None:
+    # Both conditions are present; the critical cap is the one that actually
+    # changed the letter (F either way) — the two-high cap made no visible
+    # difference of its own to explain.
+    findings = [
+        _finding(Severity.CRITICAL, ModuleName.CERTIFICATE, "CERT_EXPIRED"),
+        _finding(Severity.HIGH, ModuleName.TLS, "TLS_LEGACY_PROTOCOL"),
+        _finding(Severity.HIGH, ModuleName.HEADERS, "HSTS_MISSING"),
+    ]
+    assert grade_cap_reason(82, findings) == "capped by 1 critical-severity finding"
+
+
+def test_grade_cap_reason_is_none_when_a_critical_finding_changes_nothing() -> None:
+    # The score already bands to F on its own — the critical cap fired, but
+    # there is no disagreement between the letter and the score to explain.
+    findings = [_finding(Severity.CRITICAL, ModuleName.CERTIFICATE, "CERT_EXPIRED")]
+    assert grade_for_score(10) == Grade.F
+    assert grade_cap_reason(10, findings) is None
+
+
+def test_grade_cap_reason_is_none_for_a_single_high_finding() -> None:
+    # The two-high cap needs 2+ — one alone never changes the letter.
+    findings = [_finding(Severity.HIGH, ModuleName.TLS, "TLS_LEGACY_PROTOCOL")]
+    assert grade_cap_reason(75, findings) is None
+
+
+def test_grade_cap_reason_excludes_domain_expiry_codes_like_the_caps_themselves() -> None:
+    # Gate A follow-up A4: these codes are excluded from the caps entirely
+    # (grading.py's GRADE_CAP_EXCLUDED_CODES) — the reason must agree.
+    findings = [
+        _finding(Severity.HIGH, ModuleName.DNS, "DOMAIN_EXPIRING_CRITICAL"),
+        _finding(Severity.HIGH, ModuleName.DNS, "DOMAIN_EXPIRING_SOON"),
+    ]
+    assert grade_cap_reason(82, findings) is None

@@ -335,6 +335,12 @@ export interface Scan {
   headline: string | null;
   share_url: string;
 
+  // v3.1 (§9 Step 4 polish): why `overall_grade` reads worse than
+  // `overall_score` bands to on its own — e.g. "capped by 2 high-severity
+  // findings" — or `null` when the letter already matches the score
+  // (nothing to explain), including whenever `overall_grade` itself is null.
+  grade_cap_reason: string | null;
+
   // v3.0 (§9 Step 4b): null while `status` isn't "completed", same
   // not-yet-known convention as `counts` below. Once completed: `false`
   // when any module errored/skipped (`incomplete_modules` names them,

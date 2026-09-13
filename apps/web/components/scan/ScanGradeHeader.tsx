@@ -46,6 +46,12 @@ interface ScanGradeHeaderProps {
   grade: Grade | null;
   score: number | null;
   headline: string | null;
+  /** Contract §9 Step 4 (v3.1): why the letter reads worse than its own
+   * score bands to — e.g. "capped by 2 high-severity findings" — or `null`
+   * when there's nothing to reconcile. Backend-computed (CLAUDE.md rule 3);
+   * this component only ever displays it, never re-derives it from
+   * `grade`/`score` itself. */
+  gradeCapReason?: string | null;
   /** Heading tag for the headline sentence — `1` on the standalone public
    * share page, `2` inside the dashboard's "Latest result" section. The
    * grade dial, score and tone label render identically either way. */
@@ -67,6 +73,7 @@ export function ScanGradeHeader({
   grade,
   score,
   headline,
+  gradeCapReason,
   headingLevel = 2,
   className,
 }: ScanGradeHeaderProps) {
@@ -86,6 +93,11 @@ export function ScanGradeHeader({
           >
             Grade {grade} · {TONE_LABEL[tone]}
           </p>
+          {gradeCapReason ? (
+            <p className="text-xs text-ink-muted">
+              {grade} — {gradeCapReason}
+            </p>
+          ) : null}
         </>
       ) : (
         <IncompleteGradeDial />

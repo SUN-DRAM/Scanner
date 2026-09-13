@@ -84,6 +84,9 @@ class TestFontEmbedding:
         assert "Space-Grotesk" in font_names
         assert "Inter" in font_names
         assert "JetBrains-Mono" in font_names
+        # PDF_FIXES.md polish: the cover wordmark's documented §12 exception
+        # (styles.py) — bundled, not a system serif fallback.
+        assert "Playfair-Display" in font_names
         assert "Helvetica" not in font_names
         assert "Arial" not in font_names
 
@@ -324,3 +327,44 @@ class TestDocsLinksRespectPublicBaseUrl:
             monkeypatch, "http://localhost:3000", findings
         )
         assert "http://localhost:3000/docs/findings/cert-expiring-soon" in document
+
+
+class TestGradeCapReason:
+    """PDF_FIXES.md polish: the letter and the score can legitimately
+    disagree (a §9 Step 4 override) — the reason must render right next to
+    them, on both the cover and the executive summary, never left for the
+    reader to reconcile unaided."""
+
+    def test_reason_renders_on_cover_and_executive_summary(self) -> None:
+        scan = make_completed_scan(
+            overall_grade="C",
+            overall_score=82,
+            headline="One high-severity issue to fix, plus 3 smaller improvements.",
+            grade_cap_reason="capped by 2 high-severity findings",
+        )
+        document = render_html(scan)
+        assert document.count("C — capped by 2 high-severity findings") == 2
+
+    def test_no_reason_rendered_when_grade_matches_its_score(self) -> None:
+        scan = make_completed_scan(overall_grade="A+", overall_score=98)
+        document = render_html(scan)
+        assert 'class="grade-cap-reason"' not in document
+        assert "capped by" not in document
+
+    def test_no_reason_rendered_for_an_incomplete_assessment(self) -> None:
+        modules = default_modules()
+        modules.certificate.status = "error"
+        modules.certificate.data = None
+        modules.certificate.score = None
+        modules.certificate.grade = None
+        scan = make_completed_scan(
+            overall_grade=None,
+            overall_score=None,
+            modules=modules,
+            is_complete=False,
+            incomplete_modules=["certificate"],
+            grade_cap_reason="capped by 2 high-severity findings",  # must never render
+        )
+        document = render_html(scan)
+        assert 'class="grade-cap-reason"' not in document
+        assert "capped by" not in document

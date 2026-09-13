@@ -79,6 +79,7 @@ export function ScanResultView({ initialScan }: ScanResultViewProps) {
           grade={scan.overall_grade}
           score={scan.overall_score}
           headline={scan.headline}
+          gradeCapReason={scan.grade_cap_reason}
           headingLevel={1}
         />
         <p className="font-mono text-xs text-ink-muted">

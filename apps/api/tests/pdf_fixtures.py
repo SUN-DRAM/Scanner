@@ -317,6 +317,7 @@ def make_completed_scan(
     completed_at: datetime | None = None,
     is_complete: bool = True,
     incomplete_modules: list[str] | None = None,
+    grade_cap_reason: str | None = None,
 ) -> Scan:
     findings = findings or []
     counts = SeverityCounts(
@@ -350,6 +351,7 @@ def make_completed_scan(
         overall_score=overall_score,
         headline=headline,
         share_url=f"http://localhost:3000/scan/{resolved_slug}",
+        grade_cap_reason=grade_cap_reason,
         is_complete=is_complete,
         incomplete_modules=incomplete_modules or [],
         counts=counts,

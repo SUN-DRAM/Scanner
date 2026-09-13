@@ -18,10 +18,17 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from app.copy import article_for
 from app.enums import ModuleName, Severity
 from app.schemas import Finding
 
 _DATE_EVIDENCE_KEYS = ("not_before", "not_after", "domain_created_at", "domain_expires_at")
+
+# Evidence keys whose value is a day count that a template interpolates
+# right after an article ("has {a|an} {n}-day lifetime") — docs/PDF_FIXES.md
+# polish: "A 83-day" read wrong. `_derived_display_fields` turns each into a
+# `{key}_article` placeholder the template supplies itself.
+_DAY_ARTICLE_EVIDENCE_KEYS = ("current_lifetime_days",)
 
 
 @dataclass(frozen=True)
@@ -648,8 +655,9 @@ _DEFINITIONS: tuple[FindingDefinition, ...] = (
         severity=Severity.HIGH,
         title_template="This certificate needs a manual renewal process",
         description_template=(
-            "{hostname}'s certificate has a {current_lifetime_days}-day lifetime, "
-            "consistent with a manual renewal process. {verdict_reason}"
+            "{hostname}'s certificate has {current_lifetime_days_article} "
+            "{current_lifetime_days}-day lifetime, consistent with a manual renewal process. "
+            "{verdict_reason}"
         ),
         remediation_template=(
             "Move to an automated ACME client (Let's Encrypt, ZeroSSL, Google Trust "
@@ -678,8 +686,9 @@ _DEFINITIONS: tuple[FindingDefinition, ...] = (
         severity=Severity.INFO,
         title_template="Certificate renewal looks automated",
         description_template=(
-            "{hostname}'s certificate has a {current_lifetime_days}-day lifetime from a "
-            "recognised automated issuer. {verdict_reason}"
+            "{hostname}'s certificate has {current_lifetime_days_article} "
+            "{current_lifetime_days}-day lifetime from a recognised automated issuer. "
+            "{verdict_reason}"
         ),
         remediation_template=(
             "No action needed. Keep the renewal automation monitored so a silent failure "
@@ -710,24 +719,43 @@ def _derived_display_fields(evidence: Mapping[str, Any]) -> dict[str, str]:
         if isinstance(value, str):
             with contextlib.suppress(ValueError):
                 derived[f"{key}_display"] = _format_date_display(value)
+    for key in _DAY_ARTICLE_EVIDENCE_KEYS:
+        value = evidence.get(key)
+        if isinstance(value, int):
+            derived[f"{key}_article"] = article_for(value)
     return derived
 
 
 def build_finding(
-    code: str, evidence: Mapping[str, Any], *, severity: Severity | None = None
+    code: str,
+    evidence: Mapping[str, Any],
+    *,
+    severity: Severity | None = None,
+    extra_context: Mapping[str, Any] | None = None,
 ) -> Finding:
     """Renders a `schemas.Finding` from the catalogue entry for `code`.
 
     `evidence` must include every key its templates reference — see the
     `{...}` placeholders in the `FindingDefinition` above. Raises `ValueError`
     with the missing key named, rather than silently emitting broken copy.
+
+    `extra_context` (docs/PDF_FIXES.md polish) fills template placeholders
+    the same as `evidence` does, but is never stored on the returned
+    `Finding.evidence` — for values that are already prose meant for the
+    description, not machine-readable evidence a reader would want spelled
+    out a second time (`readiness.py`'s `verdict_reason` sentence was
+    appearing, verbatim, in both the description *and* the evidence line).
     """
     try:
         definition = FINDINGS_BY_CODE[code]
     except KeyError as exc:
         raise ValueError(f"'{code}' is not a known finding code.") from exc
 
-    context: dict[str, Any] = {**evidence, **_derived_display_fields(evidence)}
+    context: dict[str, Any] = {
+        **evidence,
+        **_derived_display_fields(evidence),
+        **(extra_context or {}),
+    }
     try:
         title = definition.title_template.format(**context)
         description = definition.description_template.format(**context)

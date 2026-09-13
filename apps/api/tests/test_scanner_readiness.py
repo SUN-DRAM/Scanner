@@ -13,7 +13,14 @@ import pytest
 from app.enums import LifetimePhase, ModuleStatus, ReadinessVerdict
 from app.scanner import ScanContext
 from app.scanner.certificate import run as run_certificate
-from app.scanner.readiness import current_phase, next_deadline_constant, phase_label, run
+from app.scanner.readiness import (
+    _verdict_for,
+    current_phase,
+    next_deadline_constant,
+    phase_label,
+    run,
+)
+from tests.pdf_fixtures import make_certificate_data
 
 
 def _ctx(hostname: str, port: int = 443, now: datetime | None = None) -> ScanContext:
@@ -44,6 +51,33 @@ def test_phase_label_matches_contract_example_wording() -> None:
     assert phase_label(LifetimePhase.PHASE_200) == "200-day maximum (in force since 15 March 2026)"
 
 
+# --- verdict copy, pure (docs/PDF_FIXES.md polish: "A 83-day" -> "An 83-day") ---
+
+
+def test_verdict_reason_uses_an_before_83_day_automated_lifetime() -> None:
+    # The exact google.com scenario the bug was found in: an 83-day
+    # Google Trust Services (ACME) certificate.
+    cert_data = make_certificate_data(
+        lifetime_days=83, issuer_organization="Google Trust Services", issuer_common_name="GTS"
+    )
+    _verdict, _label, reason = _verdict_for(cert_data)
+    assert reason.startswith("An 83-day Google Trust Services certificate")
+
+
+def test_verdict_reason_uses_a_before_a_consonant_leading_lifetime() -> None:
+    cert_data = make_certificate_data(
+        lifetime_days=90, issuer_organization="Let's Encrypt", issuer_common_name="R11"
+    )
+    _verdict, _label, reason = _verdict_for(cert_data)
+    assert reason.startswith("A 90-day Let's Encrypt certificate")
+
+
+def test_verdict_reason_article_in_the_manual_branch() -> None:
+    cert_data = make_certificate_data(lifetime_days=825, issuer_organization="DigiCert Inc")
+    _verdict, _label, reason = _verdict_for(cert_data)
+    assert reason.startswith("An 825-day certificate is longer than the 100-day cap")
+
+
 # --- verdict rules, against real certificates ---
 
 
@@ -62,6 +96,10 @@ async def test_90_day_lets_encrypt_certificate_is_automated_and_survives_2027(
     assert result.data.verdict == ReadinessVerdict.AUTOMATED
     assert result.data.survives_2027 is True
     assert any(f.code == "READINESS_OK" for f in result.findings)
+    # docs/PDF_FIXES.md polish: verdict_reason fills the description, must
+    # not also land verbatim in the evidence block.
+    finding = next(f for f in result.findings if f.code == "READINESS_OK")
+    assert "verdict_reason" not in finding.evidence
 
 
 @pytest.mark.asyncio
@@ -78,6 +116,8 @@ async def test_long_lifetime_certificate_is_manual_with_finding(require_internet
     assert result.data is not None
     assert result.data.verdict == ReadinessVerdict.MANUAL
     assert any(f.code == "READINESS_MANUAL_2027" for f in result.findings)
+    finding = next(f for f in result.findings if f.code == "READINESS_MANUAL_2027")
+    assert "verdict_reason" not in finding.evidence
 
 
 @pytest.mark.asyncio

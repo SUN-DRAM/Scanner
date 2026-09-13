@@ -43,6 +43,7 @@ const COMPLETED_SCAN: Scan = {
   overall_score: 82,
   headline: "One high-severity issue to fix, plus 3 smaller improvements.",
   share_url: "https://sundram.tech/scan/abc123abc123",
+  grade_cap_reason: null,
   is_complete: true,
   incomplete_modules: [],
   counts: { critical: 0, high: 1, medium: 1, low: 2, info: 0 },
@@ -151,5 +152,24 @@ describe("dashboard monitor detail page", () => {
     expect(html).toContain("3 of 7 checks did not complete");
     expect(html).toContain("This assessment is partial and should not be treated as a clean result");
     expect(html).not.toContain("Grade B");
+  });
+
+  it("shows the cap reason when the letter disagrees with the score", async () => {
+    // PDF_FIXES.md polish: 82 bands to B, but two high-severity findings
+    // capped the letter to C — the reader must see why, not just the two
+    // conflicting numbers.
+    const { ScanResultView } = await import("@/components/scan/ScanResultView");
+    const cappedScan: Scan = {
+      ...COMPLETED_SCAN,
+      overall_grade: "C",
+      overall_score: 82,
+      grade_cap_reason: "capped by 2 high-severity findings",
+    };
+
+    const html = renderToStaticMarkup(<ScanResultView initialScan={cappedScan} />);
+
+    expect(html).toContain("82/100");
+    expect(html).toContain("Grade C");
+    expect(html).toContain("C — capped by 2 high-severity findings");
   });
 });

@@ -157,6 +157,7 @@ def _scan(
         overall_score=95,
         headline="",
         share_url="http://localhost/scan/x",
+        grade_cap_reason=None,
         is_complete=True,
         incomplete_modules=[],
         counts=SeverityCounts(critical=0, high=0, medium=0, low=0, info=0),

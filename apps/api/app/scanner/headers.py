@@ -8,7 +8,7 @@ import re
 
 from app.enums import ModuleName
 from app.findings import build_finding
-from app.grading import worst_finding
+from app.grading import module_summary
 from app.safety import SafeFetchResult, safe_get
 from app.scanner import ScanContext, run_module
 from app.schemas import Finding, HeaderPresence, HeadersData, HstsData, ModuleResult
@@ -134,11 +134,9 @@ async def _detect(ctx: ScanContext) -> tuple[HeadersData, list[Finding], str]:
             )
         )
 
-    top = worst_finding(findings)
-    if top is not None:
-        summary = top.title + "."
-    else:
-        summary = "HTTPS redirect and every recommended security header are in place."
+    summary = module_summary(
+        findings, "HTTPS redirect and every recommended security header are in place."
+    )
 
     return data, findings, summary
 

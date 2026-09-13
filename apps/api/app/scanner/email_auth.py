@@ -11,7 +11,7 @@ import dns.asyncresolver
 
 from app.enums import DmarcPolicy, ModuleName, SpfPolicy
 from app.findings import build_finding
-from app.grading import worst_finding
+from app.grading import module_summary
 from app.scanner import ScanContext, run_module
 from app.schemas import DkimData, DmarcData, EmailAuthData, Finding, ModuleResult, SpfData
 
@@ -197,11 +197,7 @@ async def _detect(ctx: ScanContext) -> tuple[EmailAuthData, list[Finding], str]:
     if not dkim.selectors_found:
         findings.append(build_finding("DKIM_NOT_FOUND", base_evidence))
 
-    top = worst_finding(findings)
-    if top is not None:
-        summary = top.title + "."
-    else:
-        summary = "SPF, DMARC and DKIM all look correctly configured."
+    summary = module_summary(findings, "SPF, DMARC and DKIM all look correctly configured.")
 
     return data, findings, summary
 

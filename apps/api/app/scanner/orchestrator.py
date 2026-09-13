@@ -141,6 +141,7 @@ async def _mark_failed(
         overall_score=None,
         headline=None,
         share_url=share_url(record),
+        grade_cap_reason=None,
         is_complete=None,
         incomplete_modules=None,
         counts=None,
@@ -252,6 +253,7 @@ async def _run_and_persist(
         overall_score=grading_result.overall_score,
         headline=grading_result.headline,
         share_url=share_url(record),
+        grade_cap_reason=grading_result.grade_cap_reason,
         is_complete=grading_result.is_complete,
         incomplete_modules=grading_result.incomplete_modules,
         counts=SeverityCounts(

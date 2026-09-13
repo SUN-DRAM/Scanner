@@ -100,7 +100,9 @@ def _docs_url(docs_path: str) -> str:
     return f"{base}{docs_path}"
 
 
-def _grade_row_html(grade: str | None, score: int | None, size_class: str) -> str:
+def _grade_row_html(
+    grade: str | None, score: int | None, size_class: str, cap_reason: str | None = None
+) -> str:
     # §9 Step 4b (v3.0): `grade`/`score` are null exactly when `certificate`
     # didn't complete — "Incomplete", never a letter and never blank space
     # where a letter would have been, in the neutral/muted tone (not
@@ -113,10 +115,20 @@ def _grade_row_html(grade: str | None, score: int | None, size_class: str) -> st
         )
     tone = _GRADE_TONE.get(grade, "alert")
     score_html = f'<span class="cover-score">Score {score}/100</span>' if score is not None else ""
+    # §9 Step 4 (v3.1): the letter and the score can legitimately disagree
+    # (a critical finding or 2+ highs cap the letter below its own band) —
+    # shown right under the dial so a reader never has to reconcile "C ·
+    # Score 82/100" (a B) unaided.
+    cap_reason_html = (
+        f'<div class="grade-cap-reason">{_esc(grade)} — {_esc(cap_reason)}</div>'
+        if cap_reason
+        else ""
+    )
     return (
         f'<div class="{size_class}">'
         f'<span class="grade-dial grade-{tone}">{_esc(grade)}</span>'
         f"{score_html}"
+        f"{cap_reason_html}"
         f"</div>"
     )
 
@@ -150,7 +162,7 @@ def _cover_html(scan: Scan) -> str:
   <p class="cover-hostname mono">{_esc(scan.hostname)}</p>
   <p class="cover-timestamp mono">Scanned {_format_datetime_ist(scanned_at)}</p>
   <div class="cover-grade-row">
-    {_grade_row_html(scan.overall_grade, scan.overall_score, "cover-grade")}
+    {_grade_row_html(scan.overall_grade, scan.overall_score, "cover-grade", scan.grade_cap_reason)}
   </div>
   {headline_html}
   <p class="cover-disclaimer">
@@ -208,11 +220,14 @@ def _modules_table_html(scan: Scan) -> str:
 
 
 def _executive_summary_html(scan: Scan) -> str:
+    grade_row = _grade_row_html(
+        scan.overall_grade, scan.overall_score, "summary-grade", scan.grade_cap_reason
+    )
     return f"""
 <section class="section">
   <h2 class="section-title">Executive summary</h2>
   <div class="summary-grade-row">
-    {_grade_row_html(scan.overall_grade, scan.overall_score, "summary-grade")}
+    {grade_row}
   </div>
   {_counts_row_html(scan)}
   {_incomplete_banner_html(scan)}

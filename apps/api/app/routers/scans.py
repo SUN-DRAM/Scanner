@@ -147,6 +147,7 @@ def _scan_from_record(record: ScanRecord) -> Scan:
         overall_grade=None,
         overall_score=None,
         headline=None,
+        grade_cap_reason=None,
         is_complete=None,
         incomplete_modules=None,
         share_url=share_url(record),

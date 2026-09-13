@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime
 
+from app.copy import article_for
 from app.enums import LifetimePhase, ModuleName, ModuleStatus, ReadinessVerdict
 from app.findings import build_finding
 from app.grading import DROPPED_STATUSES
@@ -127,27 +128,29 @@ def _verdict_for(cert_data: CertificateData | None) -> tuple[ReadinessVerdict, s
         cert_data.issuer_organization or cert_data.issuer_common_name or "an unrecognised issuer"
     )
 
+    article = article_for(lifetime_days)
     if lifetime_days <= 100 and _is_acme_issuer(
         cert_data.issuer_organization, cert_data.issuer_common_name
     ):
         return (
             ReadinessVerdict.AUTOMATED,
             "Looks automated",
-            f"A {lifetime_days}-day {issuer} certificate reissued recently is consistent with "
-            "an automated ACME client.",
+            f"{article.capitalize()} {lifetime_days}-day {issuer} certificate reissued recently "
+            "is consistent with an automated ACME client.",
         )
     if lifetime_days <= 100:
         return (
             ReadinessVerdict.SEMI_AUTOMATED,
             "Possibly automated",
-            f"A {lifetime_days}-day certificate is short enough to suggest automation, but "
-            f"{issuer} is not a certificate authority this scan recognises as an ACME provider.",
+            f"{article.capitalize()} {lifetime_days}-day certificate is short enough to suggest "
+            f"automation, but {issuer} is not a certificate authority this scan recognises as "
+            "an ACME provider.",
         )
     return (
         ReadinessVerdict.MANUAL,
         "Looks manual",
-        f"A {lifetime_days}-day certificate is longer than the 100-day cap that takes effect "
-        "on 15 March 2027, consistent with a manually issued certificate.",
+        f"{article.capitalize()} {lifetime_days}-day certificate is longer than the 100-day cap "
+        "that takes effect on 15 March 2027, consistent with a manually issued certificate.",
     )
 
 
@@ -227,18 +230,28 @@ async def _detect(
     )
 
     findings: list[Finding] = []
+    # docs/PDF_FIXES.md polish: `verdict_reason` fills the `{verdict_reason}`
+    # placeholder in each description below but must not also land in the
+    # stored evidence block — it's already the sentence the description
+    # ends with, not a separate machine-readable fact about the cert.
     base_evidence = {
         "hostname": ctx.hostname,
         "current_lifetime_days": current_lifetime_days,
-        "verdict_reason": verdict_reason,
     }
+    extra_context = {"verdict_reason": verdict_reason}
 
     if verdict == ReadinessVerdict.MANUAL:
-        findings.append(build_finding("READINESS_MANUAL_2027", base_evidence))
+        findings.append(
+            build_finding("READINESS_MANUAL_2027", base_evidence, extra_context=extra_context)
+        )
     elif verdict == ReadinessVerdict.SEMI_AUTOMATED:
-        findings.append(build_finding("READINESS_UNVERIFIED", base_evidence))
+        findings.append(
+            build_finding("READINESS_UNVERIFIED", base_evidence, extra_context=extra_context)
+        )
     elif verdict == ReadinessVerdict.AUTOMATED:
-        findings.append(build_finding("READINESS_OK", base_evidence))
+        findings.append(
+            build_finding("READINESS_OK", base_evidence, extra_context=extra_context)
+        )
 
     return data, findings, message
 

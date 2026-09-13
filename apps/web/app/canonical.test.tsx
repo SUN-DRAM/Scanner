@@ -57,6 +57,7 @@ describe("canonical URL for /scan/[slug] (Phase 2 Step 0.2 follow-up)", () => {
         overall_score: 97,
         headline: "No serious problems found — 6 smaller improvements available.",
         share_url: "https://sundram.tech/scan/tWYyNJ8979Lg",
+        grade_cap_reason: null,
         is_complete: true,
         incomplete_modules: [],
         counts: { critical: 0, high: 0, medium: 2, low: 2, info: 2 },

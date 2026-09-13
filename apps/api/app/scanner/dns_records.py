@@ -20,7 +20,7 @@ import whois as whois_lib
 
 from app.enums import ModuleName
 from app.findings import build_finding
-from app.grading import worst_finding
+from app.grading import module_summary
 from app.scanner import ScanContext, run_module
 from app.schemas import DnsData, Finding, ModuleResult, MxRecord
 
@@ -188,11 +188,9 @@ async def _detect(ctx: ScanContext) -> tuple[DnsData, list[Finding], str]:
     if len(data.nameservers) == 1:
         findings.append(build_finding("DNS_SINGLE_NAMESERVER", base_evidence))
 
-    top = worst_finding(findings)
-    if top is not None:
-        summary = top.title + "."
-    else:
-        summary = f"{len(data.nameservers)} nameservers, CAA and DNSSEC both in place."
+    summary = module_summary(
+        findings, f"{len(data.nameservers)} nameservers, CAA and DNSSEC both in place."
+    )
 
     return data, findings, summary
 

@@ -18,7 +18,7 @@ from cryptography.x509.oid import NameOID
 
 from app.enums import ModuleName
 from app.findings import build_finding
-from app.grading import worst_finding
+from app.grading import module_summary
 from app.safety import open_pinned_connection, open_pinned_tls_handshake, resolve_and_validate
 from app.scanner import ScanContext, run_module
 from app.schemas import ChainCertificate, ChainData, Finding, ModuleResult
@@ -121,14 +121,11 @@ async def _detect(ctx: ScanContext) -> tuple[ChainData, list[Finding], str]:
                 )
             )
 
-    top = worst_finding(findings)
-    if top is not None:
-        summary = top.title + "."
-    else:
-        summary = (
-            f"Complete, correctly ordered chain of {data.chain_length} "
-            "certificates to a trusted root."
-        )
+    summary = module_summary(
+        findings,
+        f"Complete, correctly ordered chain of {data.chain_length} "
+        "certificates to a trusted root.",
+    )
 
     return data, findings, summary
 

@@ -9,7 +9,7 @@ from typing import Literal
 
 from app.enums import ModuleName
 from app.findings import build_finding
-from app.grading import worst_finding
+from app.grading import module_summary
 from app.safety import open_pinned_tls_handshake, resolve_and_validate
 from app.scanner import ScanContext, run_module
 from app.schemas import (
@@ -205,13 +205,10 @@ async def _detect(ctx: ScanContext) -> tuple[TlsData, list[Finding], str]:
             )
         )
 
-    top = worst_finding(findings)
-    if top is not None:
-        summary = top.title + "."
-    else:
-        summary = (
-            f"{data.negotiated_protocol} with {data.negotiated_cipher}, forward secrecy enabled."
-        )
+    summary = module_summary(
+        findings,
+        f"{data.negotiated_protocol} with {data.negotiated_cipher}, forward secrecy enabled.",
+    )
 
     return data, findings, summary
 

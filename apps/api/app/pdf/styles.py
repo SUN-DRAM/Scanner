@@ -3,11 +3,18 @@ properties (Step 1 decision 1.2's whole reason for picking WeasyPrint: "the
 §12 tokens are reused literally as CSS custom properties rather than
 re-expressed imperatively in Python").
 
-One deliberate, documented exception to §12: the cover logo (`assets/logo.svg`,
-provided by the human) keeps its own gold colouring rather than being
-recoloured onto the ink/cobalt palette — a human decision made explicitly for
-this asset, in this session, not a silent drift from the design system.
-Nothing else in this stylesheet uses that colour.
+Two deliberate, documented exceptions to §12, both scoped to the cover page
+only:
+
+- The cover logo (`assets/logo.svg`, provided by the human) keeps its own
+  gold colouring rather than being recoloured onto the ink/cobalt palette —
+  a human decision made explicitly for this asset, in this session, not a
+  silent drift from the design system. Nothing else in this stylesheet uses
+  that colour.
+- The `SUN-DRAM` wordmark (`.cover-wordmark`) is set in Playfair Display
+  Black rather than the locked `Space Grotesk` display face (docs/PDF_FIXES.md
+  polish, 2026-09-13, human sign-off in-session). Nothing else in this
+  stylesheet uses that face — every other heading stays on `Space Grotesk`.
 """
 
 from __future__ import annotations
@@ -109,14 +116,16 @@ a { color: var(--cobalt); text-decoration: none; }
 }
 
 .cover-logo {
-  max-width: 32mm;
-  max-height: 32mm;
+  max-width: 44mm;
+  max-height: 44mm;
   margin-bottom: 4mm;
   object-fit: contain;
 }
 
 .cover-wordmark {
-  font-size: 22pt;
+  font-family: "Playfair Display", serif;
+  font-weight: 900;
+  font-size: 26pt;
 }
 
 .cover-subtitle {
@@ -162,6 +171,15 @@ a { color: var(--cobalt); text-decoration: none; }
   font-size: 11pt;
   color: var(--ink-muted);
   margin-left: 3mm;
+}
+
+/* §9 Step 4 (v3.1): the reason a capped letter disagrees with its own
+   score — full width under the dial/score line, its own row. */
+.grade-cap-reason {
+  width: 100%;
+  margin-top: 2mm;
+  font-size: 9pt;
+  color: var(--ink-muted);
 }
 
 .cover-headline {

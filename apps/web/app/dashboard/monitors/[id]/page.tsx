@@ -154,6 +154,7 @@ export default async function MonitorDetailPage({ params }: MonitorDetailPagePro
               grade={scan.overall_grade}
               score={scan.overall_score}
               headline={scan.headline}
+              gradeCapReason={scan.grade_cap_reason}
               className="mb-8 border-b border-line pb-8"
             />
             <ScanResultBody scan={scan} />

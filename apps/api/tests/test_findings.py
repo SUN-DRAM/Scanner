@@ -101,6 +101,20 @@ def test_build_finding_matches_contract_example() -> None:
     assert finding.docs_path == "/docs/findings/cert-expiring-soon"
 
 
+def test_extra_context_fills_templates_but_is_never_stored_as_evidence() -> None:
+    # docs/PDF_FIXES.md polish: the readiness finding's evidence line was
+    # repeating its own description verbatim via `verdict_reason` — this is
+    # the mechanism readiness.py now uses to avoid it.
+    finding = build_finding(
+        "READINESS_OK",
+        {"hostname": "example.com", "current_lifetime_days": 90},
+        extra_context={"verdict_reason": "A 90-day certificate from a recognised issuer."},
+    )
+    assert "A 90-day certificate from a recognised issuer." in finding.description
+    assert finding.evidence == {"hostname": "example.com", "current_lifetime_days": 90}
+    assert "verdict_reason" not in finding.evidence
+
+
 def test_build_finding_raises_clear_error_for_unknown_code() -> None:
     with pytest.raises(ValueError, match="not a known finding code"):
         build_finding("NOT_A_REAL_CODE", {})

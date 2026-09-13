@@ -167,6 +167,38 @@ def compute_overall_grade(score: int, all_findings: Sequence[Finding]) -> Grade:
     return grade
 
 
+def grade_cap_reason(score: int, all_findings: Sequence[Finding]) -> str | None:
+    """A plain-language reason, or `None` when the letter is exactly what its
+    own score bands to. §9 Step 4's overrides can only ever make a grade
+    *worse* than its score suggests (never better) — when that happens, the
+    letter and the score visibly disagree ("C · Score 82/100", 82 being a B),
+    and a reader has no way to reconcile them without this. `None` covers
+    both "no override fired" and "an override fired but didn't actually
+    change anything" (e.g. a critical finding when the score already bands
+    to F on its own) — in both cases the letter already matches the score,
+    so there's nothing to explain.
+
+    Checked in the same precedence `compute_overall_grade` applies: the
+    critical-finding cap is unconditional (forces F outright), so if it
+    fired *and* changed the letter, it's always the reason credited, even
+    when 2+ highs are also present (their own cap can only ever leave an
+    already-`F` grade at `F` — no visible change of its own to explain).
+    """
+    cap_relevant = _grade_cap_relevant(all_findings)
+    banded = grade_for_score(score)
+    final = compute_overall_grade(score, all_findings)
+    if banded == final:
+        return None
+
+    if has_critical(cap_relevant):
+        critical_count = sum(1 for finding in cap_relevant if finding.severity == Severity.CRITICAL)
+        noun = "finding" if critical_count == 1 else "findings"
+        return f"capped by {critical_count} critical-severity {noun}"
+
+    high_count = sum(1 for finding in cap_relevant if finding.severity == Severity.HIGH)
+    return f"capped by {high_count} high-severity findings"
+
+
 # --- Step 5: headline ---
 
 _SEVERITY_ORDER: dict[Severity, int] = {
@@ -191,6 +223,36 @@ def worst_finding(findings: Sequence[Finding]) -> Finding | None:
     if not findings:
         return None
     return sort_findings(findings)[0]
+
+
+def module_summary(findings: Sequence[Finding], clean_state: str) -> str:
+    """A module's own `summary` (contract §6.2) — describes the module's
+    overall state first, never leads with a complaint about a module that
+    otherwise graded clean.
+
+    docs/PDF_FIXES.md polish: `dns` graded A+ with the summary "DNSSEC is
+    not enabled" and `email_auth` graded A+ with "No DKIM selector
+    responded" — both are `info`-severity notes (`SEVERITY_DEDUCTIONS`
+    above: `info` costs 0 points), so the module is in fact clean, and a top
+    grade next to what reads as a complaint is exactly the confusion rule 7
+    ("never guess, never mislead") exists to prevent.
+
+    `clean_state` (e.g. "SPF, DMARC and DKIM all look correctly
+    configured.") is every module's own no-findings sentence and is used
+    verbatim only when there is genuinely nothing to report. It is
+    deliberately *not* reused as the lead-in when an `info` finding is
+    present — that sentence asserts specifics ("...and DNSSEC both in
+    place") that would flatly contradict the very note being appended.
+    A neutral "no real problem" lead-in covers every module's info-only
+    case correctly instead. Anything `low` or worse is a real problem and
+    still leads on its own, unchanged.
+    """
+    top = worst_finding(findings)
+    if top is None:
+        return clean_state
+    if top.severity == Severity.INFO:
+        return f"No significant issues found. {top.title}."
+    return top.title + "."
 
 
 def select_headline(sorted_findings: Sequence[Finding]) -> str:
@@ -240,6 +302,12 @@ class ScanGrading:
     # banner rather than silently presented as clean.
     is_complete: bool
     incomplete_modules: list[ModuleName]
+    # v3.1 (PDF_FIXES.md polish): the reason `overall_grade` reads worse than
+    # `overall_score` bands to on its own — `None` when the letter already
+    # matches its score, whatever the reason (no override fired, or one
+    # fired but didn't change anything). Always `None` alongside a null
+    # `overall_grade` — there is no letter to explain a disagreement for.
+    grade_cap_reason: str | None
 
 
 # §9 Step 4b: the load-bearing module. Every other module's overall-score
@@ -286,6 +354,7 @@ def grade_scan(module_inputs: Sequence[ModuleScoreInput]) -> ScanGrading:
             headline=INCOMPLETE_ASSESSMENT_HEADLINE,
             is_complete=False,
             incomplete_modules=incomplete_modules,
+            grade_cap_reason=None,
         )
 
     overall_grade = compute_overall_grade(overall_score, all_findings)
@@ -299,4 +368,5 @@ def grade_scan(module_inputs: Sequence[ModuleScoreInput]) -> ScanGrading:
         headline=select_headline(sorted_findings),
         is_complete=is_complete,
         incomplete_modules=incomplete_modules,
+        grade_cap_reason=grade_cap_reason(overall_score, all_findings),
     )
