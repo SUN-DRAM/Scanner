@@ -52,14 +52,22 @@ def status_for_findings(findings: Sequence[Finding]) -> ModuleStatus:
 
 # --- Step 2: overall score, weighted mean with re-normalisation ---
 
+# v3.3 (docs/FIX_GRADING.md): `readiness` now carries real weight — Fault B
+# was that a module declared weight-0 ("informational only") could still
+# veto the overall grade via Step 4's two-high cap, which is incoherent on
+# its own terms and backwards commercially (the 2027 readiness verdict is
+# this product's differentiator, not a footnote). The other six weights are
+# scaled down proportionally from their v1.0 values (30/22/16/16/8/8 * 0.88,
+# rounded to sum exactly to 88) to make room, rather than taken from any one
+# module disproportionately.
 MODULE_WEIGHTS: dict[ModuleName, int] = {
-    ModuleName.CERTIFICATE: 30,
-    ModuleName.TLS: 22,
-    ModuleName.CHAIN: 16,
-    ModuleName.HEADERS: 16,
-    ModuleName.EMAIL_AUTH: 8,
-    ModuleName.DNS: 8,
-    ModuleName.READINESS: 0,
+    ModuleName.CERTIFICATE: 27,
+    ModuleName.TLS: 19,
+    ModuleName.CHAIN: 14,
+    ModuleName.HEADERS: 14,
+    ModuleName.EMAIL_AUTH: 7,
+    ModuleName.DNS: 7,
+    ModuleName.READINESS: 12,
 }
 
 # Public (not `_`-prefixed): app/scanner/readiness.py (v3.0) also needs this
@@ -76,11 +84,19 @@ class ModuleScoreInput:
     findings: Sequence[Finding]
 
 
-def compute_overall_score(
+def compute_weighted_score(
     module_inputs: Sequence[ModuleScoreInput],
 ) -> tuple[int, dict[ModuleName, int]]:
     """Weighted mean of module scores. A module with status "error" or
-    "skipped" is dropped and the remaining weights re-normalised."""
+    "skipped" is dropped and the remaining weights re-normalised.
+
+    v3.3 (docs/FIX_GRADING.md, Fault A): deducting *within* a module before
+    averaging dilutes severity almost to nothing — a high finding costs 25
+    points inside `headers`, but `headers` is one of seven modules, so the
+    same finding costs the overall score only a few points. This weighted
+    mean is no longer the overall score on its own; `compute_global_score`
+    below is the other half, and `grade_scan` takes the lower of the two.
+    """
     module_scores: dict[ModuleName, int] = {}
     weighted_sum = 0
     weight_total = 0
@@ -93,8 +109,40 @@ def compute_overall_score(
         weighted_sum += score * weight
         weight_total += weight
 
-    overall = round(weighted_sum / weight_total) if weight_total > 0 else 0
-    return overall, module_scores
+    weighted = round(weighted_sum / weight_total) if weight_total > 0 else 0
+    return weighted, module_scores
+
+
+# v3.3 (docs/FIX_GRADING.md, Fault A): a scan-wide severity budget, applied
+# independently of which module(s) a finding landed in — the discriminator
+# the diluted weighted mean above can't provide on its own (two highs and
+# eight highs used to both cap the same letter; here they cost 24 and 96
+# points respectively). Deliberately smaller per-finding than Step 1's
+# per-module deductions (12 vs. 25 for `high`, etc.) since this budget is
+# scan-wide rather than one-module-wide — the two are not meant to be the
+# same number.
+GLOBAL_SEVERITY_DEDUCTIONS: dict[Severity, int] = {
+    Severity.CRITICAL: 40,
+    Severity.HIGH: 12,
+    Severity.MEDIUM: 5,
+    Severity.LOW: 1,
+    Severity.INFO: 0,
+}
+
+
+def compute_global_score(all_findings: Sequence[Finding]) -> int:
+    """The other half of the overall score (see `compute_weighted_score`).
+
+    Excludes the same Gate A follow-up A4 codes the old grade-cap overrides
+    excluded (`_grade_cap_relevant`) — a stale or oddly-formatted WHOIS
+    record must still never be able to drag a healthy TLS setup down on its
+    own, and that guarantee has to survive this amendment, not just the
+    override mechanism it used to live in.
+    """
+    score = 100
+    for finding in _grade_cap_relevant(all_findings):
+        score -= GLOBAL_SEVERITY_DEDUCTIONS[finding.severity]
+    return max(0, min(100, score))
 
 
 # --- Step 3: grade bands ---
@@ -109,28 +157,12 @@ _GRADE_BANDS: tuple[tuple[int, Grade], ...] = (
     (0, Grade.F),
 )
 
-GRADE_ORDER: tuple[Grade, ...] = (
-    Grade.A_PLUS,
-    Grade.A,
-    Grade.B,
-    Grade.C,
-    Grade.D,
-    Grade.E,
-    Grade.F,
-)
-
 
 def grade_for_score(score: int) -> Grade:
     for threshold, grade in _GRADE_BANDS:
         if score >= threshold:
             return grade
     return Grade.F
-
-
-def _cap_grade(grade: Grade, cap: Grade) -> Grade:
-    """The worse of `grade` and `cap` — a cap can only make a grade worse,
-    never better."""
-    return grade if GRADE_ORDER.index(grade) >= GRADE_ORDER.index(cap) else cap
 
 
 # --- Step 4: overrides ---
@@ -157,46 +189,66 @@ def grade_module(score: int, findings: Sequence[Finding]) -> Grade:
 
 
 def compute_overall_grade(score: int, all_findings: Sequence[Finding]) -> Grade:
-    cap_relevant = _grade_cap_relevant(all_findings)
+    """v3.3 (docs/FIX_GRADING.md): the two-or-more-`high` cap is gone —
+    `score` (now `min(weighted, global)`, see `grade_scan`) already reflects
+    severity concentration on its own, so band(`score`) no longer needs
+    patching to make a letter feel right. The one surviving override is
+    unconditional: any `critical` finding is a categorical failure, not a
+    matter of degree, and forces `F` regardless of what the number says.
+    """
     grade = grade_for_score(score)
-    if has_critical(cap_relevant):
+    if has_critical(_grade_cap_relevant(all_findings)):
         grade = Grade.F
-    high_count = sum(1 for finding in cap_relevant if finding.severity == Severity.HIGH)
-    if high_count >= 2:
-        grade = _cap_grade(grade, Grade.C)
     return grade
 
 
-def grade_cap_reason(score: int, all_findings: Sequence[Finding]) -> str | None:
-    """A plain-language reason, or `None` when the letter is exactly what its
-    own score bands to. §9 Step 4's overrides can only ever make a grade
-    *worse* than its score suggests (never better) — when that happens, the
-    letter and the score visibly disagree ("C · Score 82/100", 82 being a B),
-    and a reader has no way to reconcile them without this. `None` covers
-    both "no override fired" and "an override fired but didn't actually
-    change anything" (e.g. a critical finding when the score already bands
-    to F on its own) — in both cases the letter already matches the score,
-    so there's nothing to explain.
+_SEVERITY_REASON_LABELS: tuple[tuple[Severity, str], ...] = (
+    (Severity.CRITICAL, "critical"),
+    (Severity.HIGH, "high"),
+    (Severity.MEDIUM, "medium"),
+    (Severity.LOW, "low"),
+)
 
-    Checked in the same precedence `compute_overall_grade` applies: the
-    critical-finding cap is unconditional (forces F outright), so if it
-    fired *and* changed the letter, it's always the reason credited, even
-    when 2+ highs are also present (their own cap can only ever leave an
-    already-`F` grade at `F` — no visible change of its own to explain).
+
+def grade_cap_reason(
+    overall_score: int, weighted_score: int, global_score: int, all_findings: Sequence[Finding]
+) -> str | None:
+    """A plain-language reason the letter or the number needs explaining, or
+    `None` when there's nothing to add. Two distinct things can be true here
+    (docs/FIX_GRADING.md, "one thing to keep" — the old two-high cap is
+    gone, but explaining a score is still useful):
+
+    1. The critical-finding override forced `F` below what `overall_score`
+       itself bands to (§9 Step 3) — the one remaining case where the
+       letter and the score visibly disagree, same as before this
+       amendment: `"capped by {n} critical-severity finding(s)"`.
+    2. Otherwise, `overall_score` came from the scan-wide severity budget
+       (`compute_global_score`) rather than the diluted per-module weighted
+       mean — worth surfacing even though the letter and the score agree,
+       since it explains *why* the score is lower than a reader averaging
+       the module grades in their head would expect:
+       `"reduced by {n} {severity}-severity finding(s)"`, naming whichever
+       severity tier is actually present, highest first.
+
+    `None` when neither applies — the letter matches its own band and nothing
+    but the ordinary weighted mean produced the number.
     """
     cap_relevant = _grade_cap_relevant(all_findings)
-    banded = grade_for_score(score)
-    final = compute_overall_grade(score, all_findings)
-    if banded == final:
-        return None
-
-    if has_critical(cap_relevant):
+    banded = grade_for_score(overall_score)
+    final = compute_overall_grade(overall_score, all_findings)
+    if banded != final:
         critical_count = sum(1 for finding in cap_relevant if finding.severity == Severity.CRITICAL)
         noun = "finding" if critical_count == 1 else "findings"
         return f"capped by {critical_count} critical-severity {noun}"
 
-    high_count = sum(1 for finding in cap_relevant if finding.severity == Severity.HIGH)
-    return f"capped by {high_count} high-severity findings"
+    if global_score < weighted_score:
+        for severity, label in _SEVERITY_REASON_LABELS:
+            count = sum(1 for finding in cap_relevant if finding.severity == severity)
+            if count:
+                noun = "finding" if count == 1 else "findings"
+                return f"reduced by {count} {label}-severity {noun}"
+
+    return None
 
 
 # --- Step 5: headline ---
@@ -302,11 +354,11 @@ class ScanGrading:
     # banner rather than silently presented as clean.
     is_complete: bool
     incomplete_modules: list[ModuleName]
-    # v3.1 (PDF_FIXES.md polish): the reason `overall_grade` reads worse than
-    # `overall_score` bands to on its own — `None` when the letter already
-    # matches its score, whatever the reason (no override fired, or one
-    # fired but didn't change anything). Always `None` alongside a null
-    # `overall_grade` — there is no letter to explain a disagreement for.
+    # v3.3 (docs/FIX_GRADING.md, reworded from v3.1's PDF_FIXES.md original):
+    # why the letter needed the critical override, or why the score is lower
+    # than the diluted weighted mean alone would suggest — `None` when
+    # neither applies. See `grade_cap_reason()`'s docstring for the two
+    # cases. Always `None` alongside a null `overall_grade`.
     grade_cap_reason: str | None
 
 
@@ -324,7 +376,7 @@ INCOMPLETE_ASSESSMENT_HEADLINE = (
 
 
 def grade_scan(module_inputs: Sequence[ModuleScoreInput]) -> ScanGrading:
-    overall_score, module_scores = compute_overall_score(module_inputs)
+    weighted_score, module_scores = compute_weighted_score(module_inputs)
 
     module_grades: dict[ModuleName, ModuleGrading] = {}
     all_findings: list[Finding] = []
@@ -357,6 +409,14 @@ def grade_scan(module_inputs: Sequence[ModuleScoreInput]) -> ScanGrading:
             grade_cap_reason=None,
         )
 
+    # v3.3 (docs/FIX_GRADING.md): the overall score is the lower of the
+    # diluted weighted mean and the scan-wide severity budget — whichever
+    # one actually reflects how bad this scan is. `min` rather than picking
+    # one or the other keeps a clean site's score exactly at the weighted
+    # mean (global has nothing to deduct) while letting concentrated
+    # severity override dilution the moment it matters.
+    global_score = compute_global_score(all_findings)
+    overall_score = min(weighted_score, global_score)
     overall_grade = compute_overall_grade(overall_score, all_findings)
 
     return ScanGrading(
@@ -368,5 +428,7 @@ def grade_scan(module_inputs: Sequence[ModuleScoreInput]) -> ScanGrading:
         headline=select_headline(sorted_findings),
         is_complete=is_complete,
         incomplete_modules=incomplete_modules,
-        grade_cap_reason=grade_cap_reason(overall_score, all_findings),
+        grade_cap_reason=grade_cap_reason(
+            overall_score, weighted_score, global_score, all_findings
+        ),
     )

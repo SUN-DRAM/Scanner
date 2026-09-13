@@ -335,10 +335,12 @@ export interface Scan {
   headline: string | null;
   share_url: string;
 
-  // v3.1 (§9 Step 4 polish): why `overall_grade` reads worse than
-  // `overall_score` bands to on its own — e.g. "capped by 2 high-severity
-  // findings" — or `null` when the letter already matches the score
-  // (nothing to explain), including whenever `overall_grade` itself is null.
+  // v3.3 (§9 Step 4, docs/FIX_GRADING.md — reworded from v3.1): why the
+  // critical-finding override forced `overall_grade` to `F` below its own
+  // score band ("capped by 1 critical-severity finding"), or why
+  // `overall_score` is lower than the diluted weighted mean alone would
+  // suggest ("reduced by 2 high-severity findings") — `null` when neither
+  // applies, including whenever `overall_grade` itself is null.
   grade_cap_reason: string | null;
 
   // v3.0 (§9 Step 4b): null while `status` isn't "completed", same

@@ -8,8 +8,9 @@ from collections.abc import Sequence
 from app.enums import Grade, ModuleName, ModuleStatus, Severity
 from app.grading import (
     ModuleScoreInput,
+    compute_global_score,
     compute_overall_grade,
-    compute_overall_score,
+    compute_weighted_score,
     count_by_severity,
     grade_cap_reason,
     grade_for_score,
@@ -76,16 +77,23 @@ def test_expired_certificate_forces_f() -> None:
 
     result = grade_scan(inputs)
 
-    # 55*30 + 100*(22+16+16+8+8) = 1650 + 7000 = 8650 / 100 = 86.5 -> round-half-to-even -> 86
-    assert result.overall_score == 86
+    # weighted: 55*27 + 100*(19+14+14+7+7+12) = 1485 + 7300 = 8785/100 -> 88.
+    # global (Step 2b, v3.3): 100 - 40 (one critical) = 60. overall = min(88, 60) = 60.
+    # 60 bands to D on its own, but the critical override still forces F.
+    assert result.overall_score == 60
     assert result.overall_grade == Grade.F
     assert result.module_grades[ModuleName.CERTIFICATE].score == 55
-    # Module score 55 alone bands to D, but the critical cap forces F.
+    # Module score 55 alone bands to D, but the module-level critical cap forces F.
     assert result.module_grades[ModuleName.CERTIFICATE].grade == Grade.F
     assert result.headline == cert_finding.title
+    assert result.grade_cap_reason == "capped by 1 critical-severity finding"
 
 
-def test_two_high_findings_cap_overall_at_c() -> None:
+def test_two_high_findings_reduce_the_score_via_the_global_budget() -> None:
+    # v3.3 (docs/FIX_GRADING.md): the old two-high cap is gone. Two highs
+    # now cost the *score* 12 points each via Step 2b's global budget,
+    # regardless of which modules they landed in — no separate letter-only
+    # override needed.
     tls_finding = _finding(Severity.HIGH, ModuleName.TLS, "TLS_LEGACY_PROTOCOL")
     headers_finding = _finding(Severity.HIGH, ModuleName.HEADERS, "HSTS_MISSING")
     inputs = _clean_inputs(
@@ -97,13 +105,13 @@ def test_two_high_findings_cap_overall_at_c() -> None:
 
     result = grade_scan(inputs)
 
-    # 100*30 + 75*22 + 100*16 + 75*16 + 100*8 + 100*8 = 9050 / 100 = 90.5
-    # -> round-half-to-even -> 90
-    assert result.overall_score == 90
-    assert result.overall_grade == Grade.C  # would otherwise band to A
-    # PDF_FIXES.md polish: 90 bands to A — the reader must be told why the
-    # letter reads three bands worse than that.
-    assert result.grade_cap_reason == "capped by 2 high-severity findings"
+    weighted, _ = compute_weighted_score(inputs)
+    global_score = compute_global_score([tls_finding, headers_finding])
+    assert weighted == 92
+    assert global_score == 76  # 100 - 12*2
+    assert result.overall_score == min(weighted, global_score) == 76
+    assert result.overall_grade == Grade.C  # band(76) — not an artificial cap
+    assert result.grade_cap_reason == "reduced by 2 high-severity findings"
 
 
 def test_complete_scan_has_is_complete_true_and_no_incomplete_modules() -> None:
@@ -195,10 +203,15 @@ def test_dropped_module_renormalises_correctly() -> None:
 
     result = grade_scan(inputs)
 
-    # dns (weight 8) dropped: (90*30 + 100*22 + 100*16 + 100*16 + 100*8) / 92
-    # = 8900/92 = 96.739... -> 97
-    assert result.overall_score == 97
-    assert result.overall_grade == Grade.A_PLUS
+    # dns (weight 7) dropped: (90*27 + 100*(19+14+14+7+12)) / 93 = 9030/93 -> 97 (weighted).
+    # global (Step 2b): 100 - 5 (one medium) = 95. overall = min(97, 95) = 95.
+    weighted, _ = compute_weighted_score(inputs)
+    global_score = compute_global_score([cert_finding])
+    assert weighted == 97
+    assert global_score == 95
+    assert result.overall_score == min(weighted, global_score) == 95
+    assert result.overall_grade == Grade.A_PLUS  # 95 is still the A+ threshold
+    assert result.grade_cap_reason == "reduced by 1 medium-severity finding"
     assert result.module_grades[ModuleName.DNS].score is None
     assert result.module_grades[ModuleName.DNS].grade is None
     assert result.is_complete is False
@@ -245,21 +258,24 @@ def test_module_grade_critical_cap_does_not_apply_without_critical_finding() -> 
     assert grade_module(score, findings) == Grade.C  # 68-77 band, no critical cap involved
 
 
-def test_double_high_cap_never_upgrades_an_already_worse_grade() -> None:
-    # Three highs alone would band well below C; the cap must not pull it up to C.
+def test_compute_overall_grade_never_overrides_without_a_critical_finding() -> None:
+    # v3.3 (docs/FIX_GRADING.md): the two-or-more-high cap is gone —
+    # compute_overall_grade has exactly one override left (critical forces
+    # F), so any number of non-critical findings must band on the score
+    # alone, however low that score is.
     findings = [_finding(Severity.HIGH, ModuleName.TLS) for _ in range(5)]
     score = score_module(findings)  # 100 - 125 -> clamped to 0
     grade = compute_overall_grade(score, findings)
-    assert grade == Grade.F  # band(0) == F, and F is already worse than the C cap
+    assert grade == grade_for_score(score) == Grade.F  # band(0), not an override
 
 
-def test_compute_overall_score_all_modules_dropped_defaults_to_zero() -> None:
+def test_compute_weighted_score_all_modules_dropped_defaults_to_zero() -> None:
     inputs = [
         ModuleScoreInput(module=module, status=ModuleStatus.ERROR, findings=[])
         for module in ALL_MODULES
     ]
-    overall, _ = compute_overall_score(inputs)
-    assert overall == 0
+    weighted, _ = compute_weighted_score(inputs)
+    assert weighted == 0
 
 
 def test_sort_findings_orders_by_severity_then_module() -> None:
@@ -382,24 +398,24 @@ def test_domain_expiring_critical_does_not_force_overall_f_even_if_critical() ->
     assert grade == grade_for_score(score)  # banded normally, no F override
 
 
-def test_domain_expiry_highs_alone_do_not_trigger_the_two_high_cap() -> None:
+def test_domain_expiry_findings_excluded_from_the_global_severity_budget() -> None:
+    # v3.3 (docs/FIX_GRADING.md): Step 2b replaces the old two-high cap as
+    # the mechanism that could drag a healthy site down from concentrated
+    # severity — the A4 guarantee has to survive by excluding these codes
+    # from Step 2b's deduction too, not just the old cap.
     findings = [
         _finding(Severity.HIGH, ModuleName.DNS, "DOMAIN_EXPIRING_CRITICAL"),
         _finding(Severity.HIGH, ModuleName.DNS, "DOMAIN_EXPIRING_SOON"),
     ]
-    score = score_module(findings)
-    grade = compute_overall_grade(score, findings)
-    assert grade == grade_for_score(score)  # no cap-to-C from two excluded highs
+    assert compute_global_score(findings) == 100  # no deduction at all
 
 
-def test_one_real_high_plus_domain_expiry_high_does_not_trigger_the_two_high_cap() -> None:
+def test_one_real_high_plus_domain_expiry_high_only_deducts_for_the_real_one() -> None:
     findings = [
         _finding(Severity.HIGH, ModuleName.TLS, "TLS_LEGACY_PROTOCOL"),
         _finding(Severity.HIGH, ModuleName.DNS, "DOMAIN_EXPIRING_CRITICAL"),
     ]
-    score = score_module(findings)
-    grade = compute_overall_grade(score, findings)
-    assert grade == grade_for_score(score)  # only one cap-relevant high — cap needs 2+
+    assert compute_global_score(findings) == 88  # 100 - 12, not - 24
 
 
 def test_domain_expiring_critical_does_not_force_its_own_module_to_f() -> None:
@@ -408,26 +424,21 @@ def test_domain_expiring_critical_does_not_force_its_own_module_to_f() -> None:
     assert grade_module(score, [finding]) == Grade.D
 
 
-# --- PDF_FIXES.md polish: grade_cap_reason ---
+# --- docs/FIX_GRADING.md v3.3: grade_cap_reason, reworked signature ---
+# (overall_score, weighted_score, global_score, all_findings) — the old
+# two-high cap is gone, so this now explains one of two things: the
+# critical override forcing F below its own band, or Step 2b's severity
+# budget (not the diluted weighted mean) having set the score.
 
 
-def test_grade_cap_reason_is_none_when_the_letter_already_matches_the_score() -> None:
-    assert grade_cap_reason(97, []) is None
+def test_grade_cap_reason_is_none_when_nothing_needs_explaining() -> None:
+    assert grade_cap_reason(97, 97, 97, []) is None
 
 
-def test_grade_cap_reason_names_the_two_high_cap() -> None:
-    findings = [
-        _finding(Severity.HIGH, ModuleName.TLS, "TLS_LEGACY_PROTOCOL"),
-        _finding(Severity.HIGH, ModuleName.HEADERS, "HSTS_MISSING"),
-    ]
-    # 82 bands to B (78-87) — the two-high cap pulls it to C.
-    assert grade_cap_reason(82, findings) == "capped by 2 high-severity findings"
-
-
-def test_grade_cap_reason_names_the_critical_cap() -> None:
+def test_grade_cap_reason_names_the_critical_override() -> None:
     findings = [_finding(Severity.CRITICAL, ModuleName.CERTIFICATE, "CERT_EXPIRED")]
-    # 55 bands to D — the critical cap forces F.
-    assert grade_cap_reason(55, findings) == "capped by 1 critical-severity finding"
+    # 55 bands to D — the critical override forces F regardless.
+    assert grade_cap_reason(55, 90, 55, findings) == "capped by 1 critical-severity finding"
 
 
 def test_grade_cap_reason_pluralises_multiple_critical_findings() -> None:
@@ -435,40 +446,59 @@ def test_grade_cap_reason_pluralises_multiple_critical_findings() -> None:
         _finding(Severity.CRITICAL, ModuleName.CERTIFICATE, "CERT_EXPIRED"),
         _finding(Severity.CRITICAL, ModuleName.CHAIN, "CHAIN_UNTRUSTED_ROOT"),
     ]
-    assert grade_cap_reason(55, findings) == "capped by 2 critical-severity findings"
+    assert grade_cap_reason(55, 90, 55, findings) == "capped by 2 critical-severity findings"
 
 
-def test_grade_cap_reason_credits_the_critical_cap_over_the_two_high_cap() -> None:
-    # Both conditions are present; the critical cap is the one that actually
-    # changed the letter (F either way) — the two-high cap made no visible
-    # difference of its own to explain.
+def test_grade_cap_reason_credits_the_critical_override_over_a_score_reduction() -> None:
+    # Both conditions are present; the critical override is the one that
+    # actually changed the letter (F either way) — global being the
+    # binding score has no visible letter/band change of its own to explain.
     findings = [
         _finding(Severity.CRITICAL, ModuleName.CERTIFICATE, "CERT_EXPIRED"),
         _finding(Severity.HIGH, ModuleName.TLS, "TLS_LEGACY_PROTOCOL"),
         _finding(Severity.HIGH, ModuleName.HEADERS, "HSTS_MISSING"),
     ]
-    assert grade_cap_reason(82, findings) == "capped by 1 critical-severity finding"
+    assert grade_cap_reason(55, 90, 55, findings) == "capped by 1 critical-severity finding"
 
 
 def test_grade_cap_reason_is_none_when_a_critical_finding_changes_nothing() -> None:
-    # The score already bands to F on its own — the critical cap fired, but
-    # there is no disagreement between the letter and the score to explain.
+    # The score already bands to F on its own, and global == weighted (the
+    # severity budget wasn't the binding constraint either) — nothing to
+    # explain on either front.
     findings = [_finding(Severity.CRITICAL, ModuleName.CERTIFICATE, "CERT_EXPIRED")]
     assert grade_for_score(10) == Grade.F
-    assert grade_cap_reason(10, findings) is None
+    assert grade_cap_reason(10, 10, 10, findings) is None
 
 
-def test_grade_cap_reason_is_none_for_a_single_high_finding() -> None:
-    # The two-high cap needs 2+ — one alone never changes the letter.
+def test_grade_cap_reason_is_none_when_the_weighted_mean_is_the_binding_score() -> None:
+    # A high finding exists, but the diluted weighted mean (not Step 2b's
+    # budget) is what actually produced the lower number — nothing about
+    # severity concentration to call out.
     findings = [_finding(Severity.HIGH, ModuleName.TLS, "TLS_LEGACY_PROTOCOL")]
-    assert grade_cap_reason(75, findings) is None
+    assert grade_cap_reason(85, 85, 88, findings) is None
 
 
-def test_grade_cap_reason_excludes_domain_expiry_codes_like_the_caps_themselves() -> None:
-    # Gate A follow-up A4: these codes are excluded from the caps entirely
-    # (grading.py's GRADE_CAP_EXCLUDED_CODES) — the reason must agree.
+def test_grade_cap_reason_names_a_single_reducing_high_finding() -> None:
+    findings = [_finding(Severity.HIGH, ModuleName.TLS, "TLS_LEGACY_PROTOCOL")]
+    # global (88) < weighted (95) — the budget, not dilution, set the score.
+    assert grade_cap_reason(88, 95, 88, findings) == "reduced by 1 high-severity finding"
+
+
+def test_grade_cap_reason_names_the_highest_severity_tier_present() -> None:
+    findings = [
+        _finding(Severity.HIGH, ModuleName.TLS, "TLS_LEGACY_PROTOCOL"),
+        _finding(Severity.HIGH, ModuleName.HEADERS, "HSTS_MISSING"),
+        _finding(Severity.MEDIUM, ModuleName.DNS, "DNS_SINGLE_NAMESERVER"),
+    ]
+    assert grade_cap_reason(61, 99, 61, findings) == "reduced by 2 high-severity findings"
+
+
+def test_grade_cap_reason_excludes_domain_expiry_codes_from_the_reduction_too() -> None:
+    # Gate A follow-up A4: these codes are excluded from Step 2b's budget
+    # (grading.py's GRADE_CAP_EXCLUDED_CODES) — the reason must agree, even
+    # if something else happened to make global < weighted.
     findings = [
         _finding(Severity.HIGH, ModuleName.DNS, "DOMAIN_EXPIRING_CRITICAL"),
         _finding(Severity.HIGH, ModuleName.DNS, "DOMAIN_EXPIRING_SOON"),
     ]
-    assert grade_cap_reason(82, findings) is None
+    assert grade_cap_reason(76, 90, 76, findings) is None

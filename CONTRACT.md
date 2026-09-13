@@ -242,12 +242,12 @@ Annual billing is monthly rate × 12 × 0.7 (30% off). Surfaced prominently at c
   "duration_ms": 5120,
   "cached": false,
 
-  "overall_grade": "C",
+  "overall_grade": "B",
   "overall_score": 82,
   "headline": "This certificate expires in 12 days and the chain is incomplete.",
   "share_url": "http://localhost:3000/scan/k3Xm9Qa2Rt7Z",
 
-  "grade_cap_reason": "capped by 2 high-severity findings",
+  "grade_cap_reason": "reduced by 2 high-severity findings",
 
   "is_complete": true,
   "incomplete_modules": [],
@@ -275,7 +275,7 @@ Rules:
 - `findings` is the flat, sorted list. Each module's own `findings` array is a subset. Duplication is intentional — the frontend uses whichever is convenient.
 - While `status` is `queued` or `running`, `modules` values may be `null`, and `overall_grade`, `overall_score`, `headline`, `counts`, `grade_cap_reason`, `is_complete`, `incomplete_modules` are `null`. Same for `status: "failed"` — no module ever ran, so there is nothing to report as incomplete versus complete.
 - **`is_complete` / `incomplete_modules` (v3.0):** once `status` is `completed`, `is_complete` is `false` whenever any module has `status: "error"` or `"skipped"`, and `incomplete_modules` names them (`ModuleName[]`, `[]` when complete). See §9 Step 4b for how this interacts with grading.
-- **`grade_cap_reason` (v3.1):** why `overall_grade` reads worse than `overall_score` bands to on its own (§9 Step 4's overrides only ever move a grade down, never up) — a plain-language string (`"capped by 2 high-severity findings"`, `"capped by 1 critical-severity finding"`) or `null` when the letter already matches its score, including whenever `overall_grade` itself is `null`. Never recomputed by the frontend (CLAUDE.md rule 3) — the letter, the score, and the reason for any gap between them all come from this one field set.
+- **`grade_cap_reason` (v3.3, reworded from v3.1):** a plain-language string explaining either why the critical-finding override forced `overall_grade` to `F` below its own score band (`"capped by 1 critical-severity finding"`), or why `overall_score` came from §9 Step 2b's severity budget rather than the diluted weighted mean (`"reduced by 2 high-severity findings"`) — or `null` when neither applies, including whenever `overall_grade` itself is `null`. Since v3.3, `overall_grade` is *always* the band `overall_score` falls into except for the critical override, so this field is no longer reconciling a letter/number disagreement in the general case — it's explanatory context for the score. Never recomputed by the frontend (CLAUDE.md rule 3).
 - `error` is `null` unless `status == "failed"`, in which case it holds an `ApiError` object (section 7).
 
 ### 6.2 `ModuleResult` — uniform wrapper for all seven modules
@@ -1258,21 +1258,39 @@ Implemented once, in `apps/api/app/grading.py`. Never duplicated in the frontend
 
 Clamp to `[0, 100]`.
 
-**Step 2 — overall score.** Weighted mean of module scores:
+**Step 2 — overall score.**
+
+**v3.3 (docs/FIX_GRADING.md):** the overall score is the *lower* of two independently-computed numbers — a diluted weighted mean (below, unchanged in method) and a scan-wide severity budget (Step 2b) that isn't diluted by which module a finding happened to land in. `min()` rather than either alone: a clean site (nothing for the budget to deduct) still scores exactly its weighted mean, but severity concentrated in one or two findings anywhere in the scan can no longer be diluted away by six other clean modules.
+
+Weighted mean of module scores:
 
 | Module | Weight |
 |---|---|
-| certificate | 30 |
-| tls | 22 |
-| chain | 16 |
-| headers | 16 |
-| email_auth | 8 |
-| dns | 8 |
-| readiness | 0 (informational only) |
+| certificate | 27 |
+| tls | 19 |
+| chain | 14 |
+| headers | 14 |
+| email_auth | 7 |
+| dns | 7 |
+| readiness | 12 |
 
 If a module has `status == "error"` or `"skipped"`, drop it and re-normalise the remaining weights.
 
-**Step 3 — grade bands.**
+**v3.3:** `readiness` moved from weight 0 to 12 (the other six scaled down proportionally from their v1.0 values to make room, not cut from any one module) — closing Fault B (`docs/FIX_GRADING.md`): a module declared "informational only" could still veto the overall grade outright via the old two-high cap below, which was incoherent on its own terms and undersold the product's own differentiator (the 2027 readiness verdict).
+
+**Step 2b — global severity budget (v3.3).** A scan-wide deduction from 100, independent of module weight or which module a finding is in:
+
+| Severity | Deduction |
+|---|---|
+| critical | 40 |
+| high | 12 |
+| medium | 5 |
+| low | 1 |
+| info | 0 |
+
+Deliberately smaller than Step 1's per-module deductions (e.g. `high` costs 12 here vs. 25 inside a module) — this budget is scan-wide, not one-module-wide, and the two are not meant to be the same number. Excludes the same Gate A follow-up A4 codes Step 4's override exclusion always has (`DOMAIN_EXPIRING_CRITICAL`, `DOMAIN_EXPIRING_SOON`) — that guarantee survives this amendment unchanged. Clamp to `[0, 100]`.
+
+**Step 3 — grade bands.** Unchanged by v3.3.
 
 | Score | Grade |
 |---|---|
@@ -1284,12 +1302,11 @@ If a module has `status == "error"` or `"skipped"`, drop it and re-normalise the
 | 40–54 | E |
 | 0–39 | F |
 
-**Step 4 — overrides, applied after banding.**
-- Any `critical` finding anywhere caps `overall_grade` at `F`.
-- Two or more `high` findings cap `overall_grade` at `C`.
-- Module grades use the same bands, computed from the module score, with the same critical cap.
-- **v1.4 (Gate A follow-up A4):** `DOMAIN_EXPIRING_CRITICAL` and `DOMAIN_EXPIRING_SOON` are excluded from both overrides above, at both the module and overall level — a stale or oddly-formatted WHOIS record (common on `.in`/`.co.in` and privacy-protected domains) must never be able to force a healthy TLS setup down to an `F` or a `C`. They still appear in the findings list at their own severity and still count toward their module's score in Step 1 — only the grade-cap overrides exclude them.
-- **`grade_cap_reason` (v3.1):** when either override above actually changes the letter from what `overall_score` alone bands to (§6.1), `Scan.grade_cap_reason` names why — `"capped by {n} critical-severity finding(s)"` when the critical cap fired and moved the letter, otherwise `"capped by {n} high-severity findings"` when the two-high cap did (critical takes precedence when both are present, since it forces `F` outright and the two-high cap can only ever leave an already-`F` grade at `F`). `null` whenever the banded letter and the final letter are the same — including when an override technically fired but didn't change anything (e.g. a critical finding on a scan that already bands to `F` on score alone). `app/grading.py`'s `grade_cap_reason()` is the one place this is computed; the frontend and the PDF only ever display it.
+**Step 4 — the one surviving override, applied after banding.**
+- Any `critical` finding anywhere caps `overall_grade` at `F`. Module grades use the same band, computed from the module score, with the same critical cap.
+- **v3.3 (docs/FIX_GRADING.md):** the two-or-more-`high` cap is removed. It existed to compensate for Step 2's dilution problem (Fault A) — with the score itself no longer diluted (Step 2b), patching the *letter* on top is no longer needed, and it was blunt besides: two highs and eight highs used to yield the identical `C`, which is exactly the "grade stopped discriminating" failure this amendment fixes. **The grade is now always exactly the band `overall_score` falls into, except for the critical override above** — no other mechanism may make the letter and the number disagree.
+- **v1.4 (Gate A follow-up A4):** `DOMAIN_EXPIRING_CRITICAL` and `DOMAIN_EXPIRING_SOON` are excluded from the critical override and from Step 2b's budget, at both the module and overall level — a stale or oddly-formatted WHOIS record (common on `.in`/`.co.in` and privacy-protected domains) must never be able to force a healthy TLS setup down to an `F` on its own. They still appear in the findings list at their own severity and still count toward their module's score in Step 1.
+- **`grade_cap_reason` (v3.3, reworded from v3.1):** `Scan.grade_cap_reason` (§6.1) names one of two things, or is `null`. (1) If the critical override forced `F` below what `overall_score` itself bands to: `"capped by {n} critical-severity finding(s)"`. (2) Otherwise, if `overall_score` came from Step 2b's budget rather than the weighted mean (i.e. the budget was the lower of the two) — surfaced even though the letter and the score now always agree, since it explains why the score is lower than a reader averaging the module grades in their head would expect: `"reduced by {n} {severity}-severity finding(s)"`, naming whichever severity tier is present, highest first. `null` when neither applies. `app/grading.py`'s `grade_cap_reason()` is the one place this is computed; the frontend and the PDF only ever display it.
 
 **Step 4b — incompleteness overrides (v3.0).** Step 2's re-normalisation is arithmetically correct for one module failing; it stops being honest when the module carrying the most weight is the one that didn't run. A scan is not "gradeable, minus certificate" the way it's gradeable minus DNS.
 
@@ -1490,4 +1507,5 @@ A phase is complete only when all of these are true:
 | 3.0 | 2026-09-12 | Grading incompleteness overrides (`docs/PDF_FIXES.md` Fix 2): `sundram.tech` graded **A+** with four of seven modules unable to complete, including `certificate` — Step 2's re-normalisation is arithmetically correct for one module failing and was never meant to hold when the load-bearing module does. New §9 Step 4b: when `certificate` has `status: "error"`/`"skipped"`, `overall_grade`/`overall_score` are `null` (no grade, not a lower one) and `headline` becomes a fixed incomplete-assessment statement (`app/grading.py`'s `INCOMPLETE_ASSESSMENT_HEADLINE`); re-normalisation is unchanged for any other module erroring, but the scan is still flagged incomplete. New §6.1 fields `is_complete`/`incomplete_modules` (`ModuleName[]`), null while not `completed`, populated once it is. Presentation rule, one shared component per surface (public result page, dashboard, PDF): "Incomplete" where the grade would render, a banner above it whenever `is_complete: false`. Also closes a real bug one level below the contract change: `app/scanner/readiness.py` was reporting `status: "ok"`/`grade: "A+"` when its only input (`certificate`'s result) never arrived, because zero findings from an incomplete detection scored identically to zero findings from a clean one — readiness now reports `status: "skipped"`, `grade: null`, `score: null` in that case, reusing `app/grading.py`'s `DROPPED_STATUSES` (renamed from a private `_DROPPED_STATUSES` — now shared by two files, not duplicated). `types/contract.ts` mirrors the `Scan` fields in the same edit. |
 | 3.1 | 2026-09-13 | Grade/score disagreement after a §9 Step 4 override (`docs/PDF_FIXES.md` polish): a badssl.com report showed "C · Score 82/100" — 82 bands to B, and the C came from the two-high-findings cap with no way for a reader to reconcile the two numbers. New §6.1 field `Scan.grade_cap_reason` — `app/grading.py`'s new `grade_cap_reason()`, `null` unless an override actually changed the letter from its own score band, otherwise `"capped by {n} critical-severity finding(s)"` or `"capped by {n} high-severity findings"` (critical takes precedence when both apply). Presentation, the same shared component per surface as the v3.0 incomplete state (public result page, dashboard, PDF): the reason renders directly under the grade wherever it's shown, as `"{grade} — {reason}"`. `types/contract.ts` mirrors the field in the same edit. |
 | 3.2 | 2026-09-13 | PDF cover polish (`docs/PDF_FIXES.md` Polish item 1, human sign-off in-session): the `SUN-DRAM` wordmark and logo on the PDF cover only. **CONTRACT GAP flagged and resolved in-session** — §12's type scale is locked to `Space Grotesk` for display, and Playfair Display is not a token this contract names anywhere; the human asked for it explicitly for this one element, so it's recorded here as a third documented exception (`app/pdf/fonts.py`/`app/pdf/styles.py`'s docstrings name the first two — the cover logo's own gold colouring and, as of this line, the wordmark's face), not a silent drift from the design system, and scoped to `.cover-wordmark` only — every other heading in the PDF and every heading anywhere in the web app stays on `Space Grotesk`. Playfair Display Black (OFL, Google Fonts) bundled as `app/pdf/fonts/PlayfairDisplay-Black.woff` alongside the existing bundled faces, registered in `font_face_css()`, embedding asserted by `tests/test_pdf_render.py::TestFontEmbedding`. `.cover-logo` grown `32mm → 44mm` per the same request. No JSON-contract surface change — `schemas.py`/`contract.ts` untouched. |
+| 3.3 | 2026-09-13 | Grading recalibration (`docs/FIX_GRADING.md`, analysed and validated in-session before any code changed, per the doc's own "do not start coding" gate — human sign-off on both open decisions below). Two faults: **Fault A** — Step 2's per-module deduction-then-average dilutes severity almost to nothing (a `high` finding costs 25 points inside `headers`, ~4 points overall at `headers`' 16% weight), so Step 4's old two-or-more-`high` cap existed only to patch the resulting letter, and did so bluntly — two highs and eight highs both landed `C`. **Fault B** — `readiness` was weighted `0` ("informational only") yet a `high`-severity `READINESS_MANUAL_2027` finding still fed the two-high cap, so a module contributing nothing to the score could still veto the letter. §9 Step 2 gains **Step 2b**, a scan-wide severity budget independent of module weight (`critical 40 / high 12 / medium 5 / low 1 / info 0`, same Gate A A4 code exclusions as before) — `overall_score` is now `min(weighted mean, Step 2b budget)`, computed once in `app/grading.py`'s new `compute_global_score()`. Step 4's two-high cap is **removed outright**: with the score itself no longer diluted, patching the letter on top is no longer needed, and `overall_grade` is now always exactly `band(overall_score)` except for the one surviving override (any `critical` finding forces `F`, unconditional, unchanged). `readiness` moves from weight `0` to `12` (closing Fault B), the other six scaled down proportionally from their v1.0 values to make room (`certificate 30→27, tls 22→19, chain 16→14, headers 16→14, email_auth 8→7, dns 8→7`, still summing to 100) — human sign-off in-session on giving readiness real weight over the alternative (keep it at 0 and drop its findings from Step 2b too), on the grounds the doc itself argued and the codebase's own module docstring already asserted: 2027 readiness is this product's differentiator, not a footnote. `grade_cap_reason` (v3.1) is reworded, not removed, per the doc's explicit "one thing to keep": it now names *either* the critical override (`"capped by {n} critical-severity finding(s)"`, the one remaining letter/score disagreement) *or*, when Step 2b's budget — not the weighted mean — set the score, `"reduced by {n} {severity}-severity finding(s)"` (naming the highest severity tier present) — `null` otherwise. Validated by hand against all four of the doc's worked examples (sundram.tech, google.com, outsideinteractive.com, badssl.com) before implementing; all four landed on the doc's own proposed grade and score. No change to Step 1 (per-module scoring), Step 3 (bands), Step 4b (incompleteness), or module-level grading (`grade_module`) — this amendment is scoped to the overall score/grade only. `app/copy.py`-adjacent housekeeping: `grading.py`'s old `compute_overall_score()` is renamed `compute_weighted_score()` (it's now one of two inputs, not the overall score itself) and the unused `_cap_grade()`/`GRADE_ORDER` helpers (only ever used by the removed cap) are deleted rather than left dead. **These grades supersede all previously issued ones** — a report generated before this amendment may show a different letter or score for the same hostname today. |
 | 2.7 | 2026-08-18 | Phase 2 Step 8 implementation: waitlist migration (`docs/PHASE_2_PROMPT.md` Step 8). **No contract-surface change** — the phase prompt specifies a one-off internal command, not an endpoint, so nothing here touches `schemas.py`/`contract.ts`. New `app/commands/migrate_waitlist.py`, run manually (`python -m app.commands.migrate_waitlist`), reads every `waitlist_signups` row (Gate B, §1.3) and, per signup, find-or-creates the user, creates a personal free-plan org (or reuses the existing one if the email already has a real account — the phase prompt's literal "creates the user, creates a personal org" reads as the common case, a brand-new email; an email that already has an account can't get a second one, since `users.email` is unique), adds the hostname as a monitor scoped to that org (§7.2/§10, unchanged), and adds the signup email as a monitor-scoped `AlertRecipient`, then sends the one plain-text email the phase prompt specifies, linking to `/app`. Idempotent — a rerun's `create_monitor` call hits `DUPLICATE_HOSTNAME` for a signup already migrated and skips it without resending. Two existing functions were made reusable rather than duplicated for this, matching every other step's "no parallel path" convention: `app/otp.py`'s private `_find_or_create_user`/`_create_personal_org` are now public `find_or_create_user`/`create_personal_org` (the latter now returns the created org), plus a new `primary_org_for_user` (the same "earliest-joined membership" lookup `deps.py`'s `CurrentOrgContext` already does at request time); and `routers/alerts.py`'s inline idempotent-insert logic for `POST /alerts/recipients` was extracted into `app/alerts.py`'s `get_or_create_recipient`, called by both the router and the new command. Internal-only addition, not part of the JSON contract: none — no schema changed, no table added. |
