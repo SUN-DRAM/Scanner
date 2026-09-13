@@ -319,6 +319,15 @@ class Scan(ContractModel):
     headline: str | None
     share_url: str
 
+    # v3.0 (§9 Step 4b): null while `status` isn't "completed" — same
+    # not-yet-known convention as `counts` above. Once completed: `false`
+    # when any module errored/skipped, `true` otherwise. `overall_grade`/
+    # `overall_score` are additionally null (not just `is_complete: false`)
+    # specifically when `certificate` is among `incomplete_modules` — every
+    # other module's weight re-normalises (§9 Step 2) instead.
+    is_complete: bool | None
+    incomplete_modules: list[ModuleName] | None
+
     counts: SeverityCounts | None
 
     modules: Modules

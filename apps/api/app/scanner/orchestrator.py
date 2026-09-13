@@ -141,6 +141,8 @@ async def _mark_failed(
         overall_score=None,
         headline=None,
         share_url=share_url(record),
+        is_complete=None,
+        incomplete_modules=None,
         counts=None,
         modules=EMPTY_MODULES,
         findings=[],
@@ -250,6 +252,8 @@ async def _run_and_persist(
         overall_score=grading_result.overall_score,
         headline=grading_result.headline,
         share_url=share_url(record),
+        is_complete=grading_result.is_complete,
+        incomplete_modules=grading_result.incomplete_modules,
         counts=SeverityCounts(
             critical=grading_result.counts[Severity.CRITICAL],
             high=grading_result.counts[Severity.HIGH],
@@ -263,7 +267,11 @@ async def _run_and_persist(
     )
 
     record.status = ScanStatus.COMPLETED.value
-    record.overall_grade = grading_result.overall_grade.value
+    # v3.0 (§9 Step 4b): None exactly when `certificate` is incomplete — the
+    # `scans.overall_grade` column is already nullable (§11) for this.
+    record.overall_grade = (
+        grading_result.overall_grade.value if grading_result.overall_grade is not None else None
+    )
     record.overall_score = grading_result.overall_score
     record.headline = grading_result.headline
     record.result = scan.model_dump(mode="json")

@@ -12,11 +12,13 @@ are public because `routers/meta.py` (Step 6) reuses them verbatim for
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from app.enums import LifetimePhase, ModuleName, ReadinessVerdict
+from app.enums import LifetimePhase, ModuleName, ModuleStatus, ReadinessVerdict
 from app.findings import build_finding
+from app.grading import DROPPED_STATUSES
 from app.scanner import ScanContext, run_module
 from app.schemas import CertificateData, Finding, ModuleResult, ReadinessData
 
@@ -244,6 +246,33 @@ async def _detect(
 async def run(
     ctx: ScanContext, certificate_result: ModuleResult[CertificateData]
 ) -> ModuleResult[ReadinessData]:
+    if certificate_result.status in DROPPED_STATUSES:
+        # PDF_FIXES.md Fix 2 / contract v3.0: readiness is a synthesis of
+        # what certificate.py found (module docstring, above), so when that
+        # input never arrived, readiness didn't run either — it was skipped,
+        # not a clean pass. Bypassing `run_module`'s normal
+        # score_module/grade_module path here matters: `_detect` below
+        # returns zero findings for the "unknown" verdict (there's nothing
+        # to flag), and zero findings would otherwise score a false 100 /
+        # grade A+ — "we don't know" scored as "no problems found", exactly
+        # the confident-wrong-answer bug this fix exists to close.
+        started = time.perf_counter()
+        data, findings, summary = await _detect(ctx, certificate_result)
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        return ModuleResult(
+            module=ModuleName.READINESS,
+            status=ModuleStatus.SKIPPED,
+            score=None,
+            grade=None,
+            label=LABEL,
+            summary=summary,
+            checked_at=ctx.now,
+            duration_ms=duration_ms,
+            findings=findings,
+            data=data,
+            error=None,
+        )
+
     async def _bound_detect(context: ScanContext) -> tuple[ReadinessData, list[Finding], str]:
         return await _detect(context, certificate_result)
 

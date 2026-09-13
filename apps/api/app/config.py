@@ -82,6 +82,21 @@ class Settings(BaseSettings):
     # and sends nothing until this is set. Delivery still needs
     # resend_api_key/email_from_address configured to actually leave the box.
     admin_digest_email: str = Field(default="", alias="ADMIN_DIGEST_EMAIL")
+    # PDF report export (§7.14, v2.9). Its own, lower ceiling than
+    # rate_limit_per_ip_per_hour — a WeasyPrint render is far more expensive
+    # than a scan-status read, so it gets its own budget, not a share of the
+    # scan one.
+    rate_limit_pdf_per_ip_per_hour: int = Field(
+        default=10, alias="RATE_LIMIT_PDF_PER_IP_PER_HOUR"
+    )
+    # A completed scan is immutable, so its rendered PDF is too — cached in
+    # Redis by scan_id for this long (app/pdf/cache.py).
+    pdf_cache_ttl_seconds: int = Field(default=86400, alias="PDF_CACHE_TTL_SECONDS")
+    # Caps concurrent WeasyPrint renders (app/pdf/renderer.py) via an
+    # in-process semaphore — rendering is synchronous and CPU-bound, so this
+    # is what keeps the export path from starving the scanner, the same
+    # priority rule the scheduler already follows (§7.9).
+    pdf_max_concurrent: int = Field(default=2, alias="PDF_MAX_CONCURRENT")
 
     @field_validator("cors_origins")
     @classmethod

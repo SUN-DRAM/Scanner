@@ -2,6 +2,38 @@ import { GradeDial } from "@/components/scan/GradeDial";
 import { cn, gradeTone, toneTextClass } from "@/lib/format";
 import type { Grade } from "@/types/contract";
 
+/**
+ * Contract §9 Step 4b (v3.0): when `certificate` didn't complete, the scan
+ * has no grade at all — this renders in the exact spot `GradeDial` would,
+ * same footprint, so "Incomplete" never reads as a layout glitch. Never a
+ * letter, never blank space where a letter would have been.
+ */
+function IncompleteGradeDial({ size = 152 }: { size?: number }) {
+  return (
+    <div
+      className="relative inline-flex items-center justify-center"
+      style={{ width: size, height: size }}
+      role="img"
+      aria-label="No grade — this assessment is incomplete"
+    >
+      <svg viewBox="0 0 120 120" className="h-full w-full">
+        <circle
+          cx="60"
+          cy="60"
+          r="54"
+          fill="none"
+          stroke="#E3E8ED"
+          strokeWidth="10"
+          strokeDasharray="4 6"
+        />
+      </svg>
+      <div className="absolute flex flex-col items-center px-4 text-center">
+        <span className="font-display text-lg leading-display text-ink-muted">Incomplete</span>
+      </div>
+    </div>
+  );
+}
+
 /** Contract §12: colour never carries meaning alone — every grade colour is
  * paired with the letter grade and a plain-language label. */
 const TONE_LABEL: Record<ReturnType<typeof gradeTone>, string> = {
@@ -55,7 +87,9 @@ export function ScanGradeHeader({
             Grade {grade} · {TONE_LABEL[tone]}
           </p>
         </>
-      ) : null}
+      ) : (
+        <IncompleteGradeDial />
+      )}
       {headline ? (
         <Heading className="max-w-reading font-display text-xl leading-display text-ink sm:text-2xl">
           {headline}

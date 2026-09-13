@@ -8,14 +8,16 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.enums import Grade
+from app.enums import Grade, ModuleName, ModuleStatus
 from app.grading import ModuleScoreInput, grade_scan
 from app.safety import HostnameResolutionError, resolve_and_validate
 from app.scanner import ScanContext
 from app.scanner.orchestrator import _modules_as_pairs, _run_all_modules
+from app.schemas import ModuleResult
 
 ACCEPTANCE_HOSTS = (
     "google.com",
@@ -89,3 +91,69 @@ async def test_full_scan_completes_well_under_the_20_second_budget(
     started = time.perf_counter()
     await _full_scan("google.com")
     assert time.perf_counter() - started < 20
+
+
+@pytest.mark.asyncio
+async def test_self_scan_of_sundram_tech_completes_with_no_module_in_error(
+    require_internet: None,
+) -> None:
+    """PDF_FIXES.md Fix 3: our own public marketing site must be scannable,
+    and every module must actually complete — a silent partial failure here
+    is exactly the "confidently wrong PDF" bug this whole prompt exists to
+    catch, and it must show up as a failing test, not a surprise in a
+    generated report. If this fails, the cause is host reachability from
+    wherever the test runs (a security group / network path issue), not
+    `app/safety.py` — §10 rule 8 deliberately exempts a hostname that merely
+    *resolves to* our own IP, blocking only that IP submitted literally
+    (see `OWN_PUBLIC_IPS`'s own docstring); confirmed directly against this
+    hostname, not assumed from reading the code."""
+    modules, grading = await _full_scan("sundram.tech")
+    errored = [name for name, result in _modules_as_pairs(modules) if result.status == "error"]
+    assert errored == [], f"modules reported error: {errored}"
+    assert grading.is_complete is True
+    assert grading.overall_grade is not None
+
+
+@pytest.mark.asyncio
+async def test_certificate_module_error_nulls_the_overall_grade_end_to_end(
+    require_internet: None,
+) -> None:
+    """PDF_FIXES.md Fix 2: the actual bug shipped as a *scan* — this is the
+    full `_run_all_modules` + `grade_scan` pipeline, real network for every
+    module except `certificate` (mocked to simulate the error every other
+    module here still completes past), proving the fix holds at the level
+    a real scan runs at, not only in grading.py's own unit tests."""
+    errored_certificate_result: ModuleResult[None] = ModuleResult(
+        module=ModuleName.CERTIFICATE,
+        status=ModuleStatus.ERROR,
+        score=None,
+        grade=None,
+        label="Certificate",
+        summary="This check did not complete — try scanning again.",
+        checked_at=datetime.now(UTC),
+        duration_ms=10,
+        findings=[],
+        data=None,
+        error="simulated failure",
+    )
+
+    with patch(
+        "app.scanner.orchestrator.certificate.run",
+        new=AsyncMock(return_value=errored_certificate_result),
+    ):
+        modules, grading = await _full_scan("google.com")
+
+    assert modules.certificate is not None
+    assert modules.certificate.status == ModuleStatus.ERROR
+    # readiness depends on certificate's own result — it must not synthesise
+    # a pass just because the mocked error left it with zero findings.
+    assert modules.readiness is not None
+    assert modules.readiness.status == ModuleStatus.SKIPPED
+    assert modules.readiness.grade is None
+    assert modules.readiness.score is None
+
+    assert grading.overall_grade is None
+    assert grading.overall_score is None
+    assert grading.is_complete is False
+    assert ModuleName.CERTIFICATE in grading.incomplete_modules
+    assert "could not be completed" in grading.headline.lower()

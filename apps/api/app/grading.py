@@ -62,7 +62,11 @@ MODULE_WEIGHTS: dict[ModuleName, int] = {
     ModuleName.READINESS: 0,
 }
 
-_DROPPED_STATUSES = frozenset({ModuleStatus.ERROR, ModuleStatus.SKIPPED})
+# Public (not `_`-prefixed): app/scanner/readiness.py (v3.0) also needs this
+# exact set — a module whose only input (another module's result) never
+# completed is itself un-scoreable the same way an errored module is, and
+# there must be exactly one definition of "un-scoreable status", not two.
+DROPPED_STATUSES = frozenset({ModuleStatus.ERROR, ModuleStatus.SKIPPED})
 
 
 @dataclass(frozen=True)
@@ -83,7 +87,7 @@ def compute_overall_score(
     for item in module_inputs:
         score = score_module(item.findings)
         module_scores[item.module] = score
-        if item.status in _DROPPED_STATUSES:
+        if item.status in DROPPED_STATUSES:
             continue
         weight = MODULE_WEIGHTS[item.module]
         weighted_sum += score * weight
@@ -220,12 +224,35 @@ class ModuleGrading:
 
 @dataclass(frozen=True)
 class ScanGrading:
-    overall_score: int
-    overall_grade: Grade
+    # v3.0 (§9 Step 4b): both `None` exactly when `certificate` is
+    # incomplete — see `is_complete`/`incomplete_modules` below. There is no
+    # partial or estimated grade in that case, only no grade.
+    overall_score: int | None
+    overall_grade: Grade | None
     module_grades: dict[ModuleName, ModuleGrading]
     counts: dict[Severity, int]
     findings: list[Finding]
     headline: str
+    # v3.0 (§6.1/§9 Step 4b): `is_complete` is false whenever *any* module
+    # was dropped (error/skipped) — re-normalisation (Step 2) still runs for
+    # every dropped module except `certificate`, so a scan can be "complete
+    # enough to grade" and still `is_complete: false`, flagged for the
+    # banner rather than silently presented as clean.
+    is_complete: bool
+    incomplete_modules: list[ModuleName]
+
+
+# §9 Step 4b: the load-bearing module. Every other module's overall-score
+# weight can be dropped and re-normalised (Step 2) without the resulting
+# number being dishonest — but a scan is not "gradeable, minus certificate"
+# the way it's gradeable minus DNS or email auth. Nothing about *this
+# hostname's actual TLS posture* is known without it.
+_GRADE_BEARING_MODULE = ModuleName.CERTIFICATE
+
+INCOMPLETE_ASSESSMENT_HEADLINE = (
+    "This assessment could not be completed — the certificate check didn't finish, "
+    "so there's no grade to show. Try scanning again."
+)
 
 
 def grade_scan(module_inputs: Sequence[ModuleScoreInput]) -> ScanGrading:
@@ -233,17 +260,35 @@ def grade_scan(module_inputs: Sequence[ModuleScoreInput]) -> ScanGrading:
 
     module_grades: dict[ModuleName, ModuleGrading] = {}
     all_findings: list[Finding] = []
+    incomplete_modules: list[ModuleName] = []
     for item in module_inputs:
         all_findings.extend(item.findings)
-        if item.status in _DROPPED_STATUSES:
+        if item.status in DROPPED_STATUSES:
+            incomplete_modules.append(item.module)
             module_grades[item.module] = ModuleGrading(module=item.module, score=None, grade=None)
             continue
         score = module_scores[item.module]
         grade = grade_module(score, item.findings)
         module_grades[item.module] = ModuleGrading(module=item.module, score=score, grade=grade)
 
-    overall_grade = compute_overall_grade(overall_score, all_findings)
     sorted_findings = sort_findings(all_findings)
+    is_complete = not incomplete_modules
+
+    if _GRADE_BEARING_MODULE in incomplete_modules:
+        # Step 4b: no grade at all, not a lower one — the module every other
+        # module's weight is normalised around never ran.
+        return ScanGrading(
+            overall_score=None,
+            overall_grade=None,
+            module_grades=module_grades,
+            counts=count_by_severity(all_findings),
+            findings=sorted_findings,
+            headline=INCOMPLETE_ASSESSMENT_HEADLINE,
+            is_complete=False,
+            incomplete_modules=incomplete_modules,
+        )
+
+    overall_grade = compute_overall_grade(overall_score, all_findings)
 
     return ScanGrading(
         overall_score=overall_score,
@@ -252,4 +297,6 @@ def grade_scan(module_inputs: Sequence[ModuleScoreInput]) -> ScanGrading:
         counts=count_by_severity(all_findings),
         findings=sorted_findings,
         headline=select_headline(sorted_findings),
+        is_complete=is_complete,
+        incomplete_modules=incomplete_modules,
     )

@@ -43,6 +43,8 @@ const COMPLETED_SCAN: Scan = {
   overall_score: 82,
   headline: "One high-severity issue to fix, plus 3 smaller improvements.",
   share_url: "https://sundram.tech/scan/abc123abc123",
+  is_complete: true,
+  incomplete_modules: [],
   counts: { critical: 0, high: 1, medium: 1, low: 2, info: 0 },
   modules: NULL_MODULES,
   findings: [],
@@ -85,6 +87,7 @@ vi.mock("@/lib/api", () => ({
   getScan: vi.fn().mockResolvedValue(COMPLETED_SCAN),
   pollScan: vi.fn().mockResolvedValue(COMPLETED_SCAN),
   submitWaitlist: vi.fn(),
+  scanReportPdfUrl: vi.fn((scanId: string) => `https://api.test/api/v1/scans/${scanId}/report.pdf`),
 }));
 
 describe("dashboard monitor detail page", () => {
@@ -125,5 +128,28 @@ describe("dashboard monitor detail page", () => {
       expect(publicHtml, `public page missing: ${fragment}`).toContain(fragment);
       expect(dashboardHtml, `dashboard page missing: ${fragment}`).toContain(fragment);
     }
+  });
+
+  it("shows Incomplete and the partial-assessment banner when certificate didn't complete", async () => {
+    // PDF_FIXES.md Fix 2 / contract v3.0: no letter grade, never a blank
+    // space where one would have been, plus the banner naming the count.
+    const { ScanResultView } = await import("@/components/scan/ScanResultView");
+    const incompleteScan: Scan = {
+      ...COMPLETED_SCAN,
+      overall_grade: null,
+      overall_score: null,
+      headline:
+        "This assessment could not be completed — the certificate check didn't finish, " +
+        "so there's no grade to show. Try scanning again.",
+      is_complete: false,
+      incomplete_modules: ["certificate", "chain", "tls"],
+    };
+
+    const html = renderToStaticMarkup(<ScanResultView initialScan={incompleteScan} />);
+
+    expect(html).toContain("Incomplete");
+    expect(html).toContain("3 of 7 checks did not complete");
+    expect(html).toContain("This assessment is partial and should not be treated as a clean result");
+    expect(html).not.toContain("Grade B");
   });
 });

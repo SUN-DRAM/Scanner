@@ -101,6 +101,79 @@ def test_two_high_findings_cap_overall_at_c() -> None:
     assert result.overall_grade == Grade.C  # would otherwise band to A
 
 
+def test_complete_scan_has_is_complete_true_and_no_incomplete_modules() -> None:
+    result = grade_scan(_clean_inputs())
+    assert result.is_complete is True
+    assert result.incomplete_modules == []
+
+
+def test_certificate_error_nulls_overall_grade_and_score() -> None:
+    # PDF_FIXES.md Fix 2 / contract v3.0 §9 Step 4b: the load-bearing module
+    # errored — there is no grade at all, not a lower one via re-normalisation.
+    inputs = [
+        ModuleScoreInput(module=ModuleName.CERTIFICATE, status=ModuleStatus.ERROR, findings=[]),
+        ModuleScoreInput(module=ModuleName.TLS, status=ModuleStatus.OK, findings=[]),
+        ModuleScoreInput(module=ModuleName.CHAIN, status=ModuleStatus.OK, findings=[]),
+        ModuleScoreInput(module=ModuleName.HEADERS, status=ModuleStatus.OK, findings=[]),
+        ModuleScoreInput(module=ModuleName.EMAIL_AUTH, status=ModuleStatus.OK, findings=[]),
+        ModuleScoreInput(module=ModuleName.DNS, status=ModuleStatus.OK, findings=[]),
+        ModuleScoreInput(module=ModuleName.READINESS, status=ModuleStatus.SKIPPED, findings=[]),
+    ]
+
+    result = grade_scan(inputs)
+
+    assert result.overall_grade is None
+    assert result.overall_score is None
+    assert result.is_complete is False
+    assert set(result.incomplete_modules) == {ModuleName.CERTIFICATE, ModuleName.READINESS}
+    assert result.headline == (
+        "This assessment could not be completed — the certificate check didn't finish, "
+        "so there's no grade to show. Try scanning again."
+    )
+    assert result.module_grades[ModuleName.CERTIFICATE].grade is None
+    assert result.module_grades[ModuleName.CERTIFICATE].score is None
+
+
+def test_certificate_skipped_also_nulls_overall_grade() -> None:
+    inputs = _clean_inputs()
+    skipped_certificate = ModuleScoreInput(
+        module=ModuleName.CERTIFICATE, status=ModuleStatus.SKIPPED, findings=[]
+    )
+    inputs = [
+        skipped_certificate if item.module == ModuleName.CERTIFICATE else item for item in inputs
+    ]
+
+    result = grade_scan(inputs)
+
+    assert result.overall_grade is None
+    assert result.overall_score is None
+    assert result.is_complete is False
+    assert result.incomplete_modules == [ModuleName.CERTIFICATE]
+
+
+def test_non_certificate_module_error_still_computes_a_grade_but_marks_incomplete() -> None:
+    # Step 2's re-normalisation is unchanged for a module other than
+    # certificate — the numeric result stays exactly as before v3.0 — but
+    # the scan must still be flagged incomplete, never presented as clean.
+    inputs = [
+        ModuleScoreInput(module=ModuleName.CERTIFICATE, status=ModuleStatus.OK, findings=[]),
+        ModuleScoreInput(module=ModuleName.TLS, status=ModuleStatus.OK, findings=[]),
+        ModuleScoreInput(module=ModuleName.CHAIN, status=ModuleStatus.ERROR, findings=[]),
+        ModuleScoreInput(module=ModuleName.HEADERS, status=ModuleStatus.OK, findings=[]),
+        ModuleScoreInput(module=ModuleName.EMAIL_AUTH, status=ModuleStatus.OK, findings=[]),
+        ModuleScoreInput(module=ModuleName.DNS, status=ModuleStatus.OK, findings=[]),
+        ModuleScoreInput(module=ModuleName.READINESS, status=ModuleStatus.OK, findings=[]),
+    ]
+
+    result = grade_scan(inputs)
+
+    assert result.overall_grade is not None
+    assert result.overall_score is not None
+    assert result.overall_grade == Grade.A_PLUS  # unchanged re-normalisation math
+    assert result.is_complete is False
+    assert result.incomplete_modules == [ModuleName.CHAIN]
+
+
 def test_dropped_module_renormalises_correctly() -> None:
     cert_finding = _finding(Severity.MEDIUM, ModuleName.CERTIFICATE, "CERT_LONG_LIFETIME")
     inputs = [
@@ -123,6 +196,8 @@ def test_dropped_module_renormalises_correctly() -> None:
     assert result.overall_grade == Grade.A_PLUS
     assert result.module_grades[ModuleName.DNS].score is None
     assert result.module_grades[ModuleName.DNS].grade is None
+    assert result.is_complete is False
+    assert result.incomplete_modules == [ModuleName.DNS]
 
 
 # --- granular unit tests ---

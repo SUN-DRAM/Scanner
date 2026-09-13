@@ -1,9 +1,11 @@
 """`POST /api/v1/scans`, `GET /api/v1/scans/{scan_id}`, and
-`GET /api/v1/scans/slug/{public_slug}` (contract §7).
+`GET /api/v1/scans/slug/{public_slug}` (contract §7), plus the two
+`.../report.pdf` PDF export endpoints (§7.14, v2.9).
 
 This is the only place a `scans` row is created or an `arq` job is
 enqueued. `app.scanner.orchestrator.run_scan` (run by the worker) is the
-only place a row is ever updated after that.
+only place a row is ever updated after that. The PDF endpoints only ever
+read a row already written by that path — no re-scan, no re-grading.
 """
 
 from __future__ import annotations
@@ -27,7 +29,14 @@ from app.db import get_session
 from app.enums import ScanStatus
 from app.errors import ApiException, ErrorCode
 from app.models import ScanRecord
-from app.ratelimit import RateLimitExceeded, enforce_scan_rate_limits
+from app.pdf.cache import get_cached_pdf, set_cached_pdf
+from app.pdf.filename import build_report_filename
+from app.pdf.renderer import render_scan_pdf
+from app.ratelimit import (
+    RateLimitExceeded,
+    enforce_pdf_rate_limit,
+    enforce_scan_rate_limits,
+)
 from app.redis_client import get_arq_pool, get_redis_client
 from app.safety import (
     HostnameResolutionError,
@@ -138,6 +147,8 @@ def _scan_from_record(record: ScanRecord) -> Scan:
         overall_grade=None,
         overall_score=None,
         headline=None,
+        is_complete=None,
+        incomplete_modules=None,
         share_url=share_url(record),
         counts=None,
         modules=EMPTY_MODULES,
@@ -253,3 +264,107 @@ async def get_scan_by_slug(public_slug: str, session: AsyncSession = Depends(get
     await increment_daily_stat(session, "share_link_opens")
     await session.commit()
     return _scan_from_record(record)
+
+
+async def _get_scan_record_by_id(session: AsyncSession, scan_id: str) -> ScanRecord:
+    try:
+        parsed_id = uuid.UUID(scan_id)
+    except ValueError as exc:
+        raise ApiException(
+            ErrorCode.SCAN_NOT_FOUND, f"No scan found for '{scan_id}'.", {"scan_id": scan_id}
+        ) from exc
+    record = await session.get(ScanRecord, parsed_id)
+    if record is None:
+        raise ApiException(
+            ErrorCode.SCAN_NOT_FOUND, f"No scan found for '{scan_id}'.", {"scan_id": scan_id}
+        )
+    return record
+
+
+async def _get_scan_record_by_slug(session: AsyncSession, public_slug: str) -> ScanRecord:
+    stmt = select(ScanRecord).where(ScanRecord.public_slug == public_slug)
+    record = (await session.execute(stmt)).scalar_one_or_none()
+    if record is None:
+        raise ApiException(
+            ErrorCode.SCAN_NOT_FOUND,
+            f"No scan found for '{public_slug}'.",
+            {"public_slug": public_slug},
+        )
+    return record
+
+
+async def _serve_report_pdf(
+    record: ScanRecord, request: Request, redis_client: Redis
+) -> Response:
+    """Shared by both `.../report.pdf` routes below (contract §7.14, v2.9):
+    same lookup semantics as the plain scan-GET pair, same `404
+    SCAN_NOT_FOUND` (raised by the caller before this is reached), plus the
+    export-specific rules — `409` on a non-completed scan, its own rate
+    limit, and the Redis cache. Deliberately does **not** call
+    `increment_daily_stat("share_link_opens", ...)` even when reached via the
+    slug route — that counter means "the shareable HTML page was opened,"
+    not "a PDF was downloaded," and a browser never navigates here."""
+    if record.status != ScanStatus.COMPLETED.value:
+        raise ApiException(
+            ErrorCode.REPORT_NOT_AVAILABLE,
+            "This report isn't ready yet. It's only available once the scan completes.",
+            {"scan_id": str(record.scan_id), "status": record.status},
+        )
+
+    scan_id = str(record.scan_id)
+    settings = get_settings()
+
+    # Cache check first, same precedent as POST /scans's cached-scan path
+    # (a cache hit never touches the rate limiter) — a shared link posted in
+    # a WhatsApp/Slack group must not let its own popularity trip the limit
+    # for the people opening it.
+    cached = await get_cached_pdf(redis_client, scan_id)
+    if cached is not None:
+        pdf_bytes = cached
+    else:
+        try:
+            await enforce_pdf_rate_limit(
+                redis_client,
+                client_ip=_client_ip(request),
+                per_ip_per_hour=settings.rate_limit_pdf_per_ip_per_hour,
+            )
+        except RateLimitExceeded as exc:
+            minutes = max(1, exc.retry_after_seconds // 60)
+            raise ApiException(
+                ErrorCode.RATE_LIMITED,
+                f"Too many report downloads from this address. Try again in {minutes} minutes.",
+                {"retry_after_seconds": exc.retry_after_seconds},
+            ) from exc
+
+        scan = _scan_from_record(record)
+        pdf_bytes = await render_scan_pdf(scan)
+        await set_cached_pdf(redis_client, scan_id, pdf_bytes, settings.pdf_cache_ttl_seconds)
+
+    filename = build_report_filename(record.hostname, record.completed_at or record.created_at)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/scans/{scan_id}/report.pdf")
+async def get_scan_report_pdf(
+    scan_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    redis_client: Redis = Depends(get_redis_client),
+) -> Response:
+    record = await _get_scan_record_by_id(session, scan_id)
+    return await _serve_report_pdf(record, request, redis_client)
+
+
+@router.get("/scans/slug/{public_slug}/report.pdf")
+async def get_scan_report_pdf_by_slug(
+    public_slug: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    redis_client: Redis = Depends(get_redis_client),
+) -> Response:
+    record = await _get_scan_record_by_slug(session, public_slug)
+    return await _serve_report_pdf(record, request, redis_client)

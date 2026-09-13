@@ -107,3 +107,18 @@ class FakeArqPool:
 @pytest.fixture
 def fake_arq_pool() -> FakeArqPool:
     return FakeArqPool()
+
+
+@pytest.fixture(scope="session")
+def require_weasyprint() -> None:
+    """PDF export (§7.14) needs WeasyPrint's native Pango/HarfBuzz libraries
+    (see apps/api/Dockerfile), not installable via pip alone. Skips (rather
+    than fails) outside `docker compose exec api pytest` — same
+    graceful-degrade pattern as `redis_client`/`db_session` above."""
+    try:
+        from weasyprint import HTML  # noqa: F401
+    except OSError:
+        pytest.skip(
+            "WeasyPrint's native libraries aren't loadable here — "
+            "run via `docker compose exec api pytest`."
+        )

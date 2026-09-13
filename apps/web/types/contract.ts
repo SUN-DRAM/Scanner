@@ -83,7 +83,9 @@ export type ErrorCode =
   | "PLAN_REQUIRED"
   | "DUPLICATE_HOSTNAME"
   | "NOT_FOUND"
-  | "WEBHOOK_INVALID_SIGNATURE";
+  | "WEBHOOK_INVALID_SIGNATURE"
+  // --- PDF report export (contract v2.9) ---
+  | "REPORT_NOT_AVAILABLE";
 
 export interface ApiError {
   code: ErrorCode;
@@ -333,6 +335,15 @@ export interface Scan {
   headline: string | null;
   share_url: string;
 
+  // v3.0 (§9 Step 4b): null while `status` isn't "completed", same
+  // not-yet-known convention as `counts` below. Once completed: `false`
+  // when any module errored/skipped (`incomplete_modules` names them,
+  // `[]` when complete). `overall_grade`/`overall_score` are additionally
+  // null specifically when `certificate` is among `incomplete_modules` —
+  // no grade, not a lower one.
+  is_complete: boolean | null;
+  incomplete_modules: ModuleName[] | null;
+
   counts: SeverityCounts | null;
 
   modules: Modules;
@@ -357,6 +368,15 @@ export interface ScanCreateResponse {
   share_url: string;
   cached: boolean;
 }
+
+// --- 7.14 PDF report export (contract v2.9) ---
+// GET /api/v1/scans/{scan_id}/report.pdf -> application/pdf (200) | 404 SCAN_NOT_FOUND
+//   | 409 REPORT_NOT_AVAILABLE | 429 RATE_LIMITED
+// GET /api/v1/scans/slug/{public_slug}/report.pdf -> same as above, by slug
+// No response body shape — raw PDF bytes, `Content-Disposition: attachment`.
+// The frontend never fetches this: it's a plain <a href> to the API's public
+// base URL (see lib/api.ts's scanReportPdfUrl), hidden unless
+// scan.status === "completed".
 
 // --- 7.5 POST /api/v1/waitlist ---
 

@@ -80,6 +80,22 @@ async def enforce_otp_request_rate_limits(
     await _check_and_record(redis, ip_key, per_ip_per_hour, window_seconds)
 
 
+async def enforce_pdf_rate_limit(
+    redis: Redis,
+    *,
+    client_ip: str,
+    per_ip_per_hour: int,
+    window_seconds: int = WINDOW_SECONDS,
+) -> None:
+    """Contract §7.14 (v2.9): PDF report export gets its own, lower per-IP
+    ceiling (`RATE_LIMIT_PDF_PER_IP_PER_HOUR`) rather than sharing
+    `enforce_scan_rate_limits`'s bucket — a WeasyPrint render is far more
+    expensive than a scan-status read. Same sliding-window mechanism, its
+    own key prefix so the two never collide."""
+    ip_key = f"ratelimit:pdf:ip:{hash_for_bucket(client_ip)}"
+    await _check_and_record(redis, ip_key, per_ip_per_hour, window_seconds)
+
+
 async def enforce_monitor_scan_rate_limit(
     redis: Redis,
     *,

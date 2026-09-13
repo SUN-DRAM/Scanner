@@ -20,8 +20,18 @@ RUN pip install --no-cache-dir --prefix=/install .[dev]
 # --- runtime ---
 FROM python:3.12-slim AS runtime
 
+# PDF export (§7.14, v2.9): WeasyPrint >=60 dropped Cairo/GDK-PixBuf
+# entirely (pydyf + Pillow handle PDF writing and raster images now) — only
+# Pango (text shaping) and a HarfBuzz subsetting lib remain, per WeasyPrint's
+# own documented Debian install list. Lighter than the Step 1 decision
+# assumed (which named the pre-v60 Cairo/GDK-PixBuf dependency set); flagged
+# here rather than installing packages nothing actually loads.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libpq5 \
+    && apt-get install -y --no-install-recommends \
+        libpq5 \
+        libpango-1.0-0 \
+        libpangoft2-1.0-0 \
+        libharfbuzz-subset0 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 scanner \
     && useradd --uid 1000 --gid scanner --shell /bin/bash --create-home scanner

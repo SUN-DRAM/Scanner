@@ -188,6 +188,20 @@ export function getDeadlines(): Promise<MetaDeadlines> {
   return apiFetch<MetaDeadlines>("/api/v1/meta/deadlines");
 }
 
+/**
+ * Contract §7.14 (v2.9): a plain, public, unauthenticated GET returning
+ * `application/pdf` — no JSON, no fetch/blob dance needed. Deliberately
+ * *not* built on `resolveApiBaseUrl()`/`apiFetch`: those exist to route
+ * server-side calls through the internal `http://api:8000` service name
+ * (see that function's own comment), but this URL is only ever handed to
+ * the browser as an `<a href>` — it must always be the public address, even
+ * when the component rendering it first runs server-side during SSR.
+ */
+export function scanReportPdfUrl(scanId: string): string {
+  const base = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+  return `${base}/api/v1/scans/${encodeURIComponent(scanId)}/report.pdf`;
+}
+
 export function submitWaitlist(request: WaitlistCreateRequest): Promise<WaitlistCreateResponse> {
   return apiFetch<WaitlistCreateResponse>("/api/v1/waitlist", {
     method: "POST",

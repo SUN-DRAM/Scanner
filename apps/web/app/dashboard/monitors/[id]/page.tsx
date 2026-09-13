@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { GradeHistorySparkline } from "@/components/app/GradeHistorySparkline";
 import { MonitorActions } from "@/components/app/MonitorActions";
+import { IncompleteAssessmentBanner } from "@/components/scan/IncompleteAssessmentBanner";
 import { ScanGradeHeader } from "@/components/scan/ScanGradeHeader";
 import { ScanProgress } from "@/components/scan/ScanProgress";
 import { ScanResultBody } from "@/components/scan/ScanResultBody";
@@ -144,6 +145,11 @@ export default async function MonitorDetailPage({ params }: MonitorDetailPagePro
           </p>
         ) : (
           <>
+            {scan.is_complete === false ? (
+              <IncompleteAssessmentBanner
+                incompleteModuleCount={scan.incomplete_modules?.length ?? 0}
+              />
+            ) : null}
             <ScanGradeHeader
               grade={scan.overall_grade}
               score={scan.overall_score}

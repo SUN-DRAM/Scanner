@@ -52,6 +52,10 @@ class ErrorCode(StrEnum):
     # §1.5 error list: "reject unverified with 400" (webhooks) needs a
     # machine-readable code, and no existing one describes a bad signature.
     WEBHOOK_INVALID_SIGNATURE = "WEBHOOK_INVALID_SIGNATURE"
+    # PDF report export (§7.14, v2.9): a queued/running/failed scan has no
+    # grade, no findings, no modules — a PDF of it would be an empty
+    # document with our logo on it, which is worse than no document.
+    REPORT_NOT_AVAILABLE = "REPORT_NOT_AVAILABLE"
 
 
 ERROR_CODE_HTTP_STATUS: dict[ErrorCode, int] = {
@@ -74,6 +78,7 @@ ERROR_CODE_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.DUPLICATE_HOSTNAME: status.HTTP_409_CONFLICT,
     ErrorCode.NOT_FOUND: status.HTTP_404_NOT_FOUND,
     ErrorCode.WEBHOOK_INVALID_SIGNATURE: status.HTTP_400_BAD_REQUEST,
+    ErrorCode.REPORT_NOT_AVAILABLE: status.HTTP_409_CONFLICT,
 }
 
 

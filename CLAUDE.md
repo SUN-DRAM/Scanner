@@ -6,7 +6,7 @@ Public TLS/DNS scanner. A stranger enters a hostname and gets a graded report th
 
 `CONTRACT.md` at the repo root is the binding engineering contract. Read it in full before writing code in any area you haven't touched yet. It defines every enum, field name, endpoint, error code, finding code, grading rule, and design token.
 
-`ROADMAP.md` defines phase scope. We are in **Phase 1**. Building anything from Phase 2+ is scope creep — say so and stop.
+`ROADMAP.md` defines phase scope. **Phase 1 and Phase 2 are complete** — contract is at v2.8; accounts, monitoring, alerts, billing, and the ad hoc internal admin dashboard are shipped. **Phase 3 has not formally started.** (Noted as stale and left unfixed in `CONTRACT.md` §14 v2.8 — corrected here 2026-09-12.) Before building anything, check the specific feature/phase prompt you were given against `ROADMAP.md`'s scope table for that work's actual phase — say so and stop if it reaches ahead of what's been explicitly asked for.
 
 ## Non-negotiable rules
 

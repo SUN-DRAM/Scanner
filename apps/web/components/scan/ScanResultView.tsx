@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 
+import { DownloadReportButton } from "@/components/scan/DownloadReportButton";
+import { IncompleteAssessmentBanner } from "@/components/scan/IncompleteAssessmentBanner";
 import { ScanGradeHeader } from "@/components/scan/ScanGradeHeader";
 import { ScanProgress } from "@/components/scan/ScanProgress";
 import { ScanResultBody } from "@/components/scan/ScanResultBody";
@@ -66,6 +68,11 @@ export function ScanResultView({ initialScan }: ScanResultViewProps) {
 
   return (
     <main className="mx-auto max-w-content px-4 py-12">
+      {scan.is_complete === false ? (
+        <IncompleteAssessmentBanner
+          incompleteModuleCount={scan.incomplete_modules?.length ?? 0}
+        />
+      ) : null}
       <section className="flex flex-col items-center gap-4 border-b border-line pb-10 text-center">
         <p className="font-mono text-sm text-ink-muted">{scan.hostname}</p>
         <ScanGradeHeader
@@ -77,6 +84,7 @@ export function ScanResultView({ initialScan }: ScanResultViewProps) {
         <p className="font-mono text-xs text-ink-muted">
           Scanned {formatDateTimeDisplay(scannedAt)}
         </p>
+        <DownloadReportButton scanId={scan.scan_id} />
         <WaitlistForm scanId={scan.scan_id} hostname={scan.hostname} />
       </section>
 

@@ -20,11 +20,12 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.enums import ScanStatus
+from app.enums import ModuleStatus, ScanStatus
 from app.main import app
 from app.models import ScanRecord
 from app.redis_client import get_arq_pool, get_redis_client
 from tests.conftest import FakeArqPool
+from tests.pdf_fixtures import default_modules, make_completed_scan
 
 
 @pytest.fixture
@@ -312,3 +313,84 @@ async def test_get_scan_by_slug_returns_404_for_unknown_slug(client: AsyncClient
     response = await client.get("/api/v1/scans/slug/doesnotexist1")
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "SCAN_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_get_scan_by_id_reports_a_complete_scan(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Contract v3.0 §9 Step 4b: a fully complete scan's JSON carries
+    `is_complete: true` and an empty `incomplete_modules`."""
+    hostname = _test_hostname()
+    scan = make_completed_scan(hostname=hostname)
+    record = ScanRecord(
+        scan_id=uuid.UUID(scan.scan_id),
+        public_slug=scan.public_slug,
+        hostname=hostname,
+        port=443,
+        status=ScanStatus.COMPLETED.value,
+        overall_grade=scan.overall_grade,
+        overall_score=scan.overall_score,
+        headline=scan.headline,
+        result=scan.model_dump(mode="json"),
+        completed_at=scan.completed_at,
+        client_ip_hash="deadbeef",
+    )
+    db_session.add(record)
+    await db_session.commit()
+    try:
+        response = await client.get(f"/api/v1/scans/{record.scan_id}")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["is_complete"] is True
+        assert body["incomplete_modules"] == []
+    finally:
+        await _cleanup(db_session, hostname)
+
+
+@pytest.mark.asyncio
+async def test_get_scan_by_id_reports_an_incomplete_scan(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """A scan whose certificate module errored has no grade at all, and
+    `is_complete`/`incomplete_modules` name what didn't finish."""
+    hostname = _test_hostname()
+    modules = default_modules()
+    modules.certificate.status = ModuleStatus.ERROR
+    modules.certificate.data = None
+    modules.certificate.score = None
+    modules.certificate.grade = None
+    scan = make_completed_scan(
+        hostname=hostname,
+        overall_grade=None,
+        overall_score=None,
+        headline="This assessment could not be completed.",
+        modules=modules,
+        is_complete=False,
+        incomplete_modules=["certificate"],
+    )
+    record = ScanRecord(
+        scan_id=uuid.UUID(scan.scan_id),
+        public_slug=scan.public_slug,
+        hostname=hostname,
+        port=443,
+        status=ScanStatus.COMPLETED.value,
+        overall_grade=None,
+        overall_score=None,
+        headline=scan.headline,
+        result=scan.model_dump(mode="json"),
+        completed_at=scan.completed_at,
+        client_ip_hash="deadbeef",
+    )
+    db_session.add(record)
+    await db_session.commit()
+    try:
+        response = await client.get(f"/api/v1/scans/{record.scan_id}")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["overall_grade"] is None
+        assert body["overall_score"] is None
+        assert body["is_complete"] is False
+        assert "certificate" in body["incomplete_modules"]
+    finally:
+        await _cleanup(db_session, hostname)
