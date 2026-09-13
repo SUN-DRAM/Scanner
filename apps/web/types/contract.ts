@@ -18,6 +18,18 @@ export type Grade = "A+" | "A" | "B" | "C" | "D" | "E" | "F";
 export type ModuleName =
   "certificate" | "chain" | "tls" | "dns" | "email_auth" | "headers" | "readiness";
 
+// v3.4 (docs/Fix headers and incomplete.md, §6.2 ModuleResult.error): the
+// closed set of reasons a module can fail to complete.
+export type ModuleErrorCode =
+  | "MODULE_TIMEOUT"
+  | "CONNECTION_REFUSED"
+  | "CONNECTION_RESET"
+  | "TLS_ERROR"
+  | "TOO_MANY_REDIRECTS"
+  | "BLOCKED_REDIRECT_TARGET"
+  | "HTTP_ERROR"
+  | "UNEXPECTED_ERROR";
+
 export type ReadinessVerdict = "automated" | "semi_automated" | "manual" | "unknown";
 
 export type LifetimePhase = "pre_2026" | "phase_200" | "phase_100" | "phase_47";
@@ -283,6 +295,14 @@ export interface Finding {
 
 // --- 6.2 ModuleResult — uniform wrapper, generic over the module's data shape ---
 
+// v3.4 (docs/Fix headers and incomplete.md): a structured, safe reason a
+// module has status "error" — never a traceback, internal hostname, or
+// library name (those stay in the backend's application log only).
+export interface ModuleError {
+  code: ModuleErrorCode;
+  message: string;
+}
+
 export interface ModuleResult<TData> {
   module: ModuleName;
   status: ModuleStatus;
@@ -294,7 +314,8 @@ export interface ModuleResult<TData> {
   duration_ms: number;
   findings: Finding[];
   data: TData | null;
-  error: string | null;
+  // v3.4: structured (ModuleError), not a bare string.
+  error: ModuleError | null;
 }
 
 /** All seven keys are always present, per contract §6.1 — even mid-scan, as null entries. */

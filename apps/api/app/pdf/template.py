@@ -69,6 +69,33 @@ _SEVERITY_TONE = {
     "info": "info",
 }
 
+# docs/Fix headers and incomplete.md §4.1: a short, mid-sentence clause per
+# ModuleErrorCode — deliberately not the full ModuleError.message (that
+# already names the module and an exact duration, which would read
+# redundant spliced into "...did not complete: Security headers — The
+# security headers check timed out after 3 seconds."). UNEXPECTED_ERROR has
+# no entry: not specific enough to be worth appending ("append the reason
+# where we have one"). Mirrors IncompleteAssessmentBanner.tsx's own copy of
+# this table — same duplication pattern as _GRADE_TONE/gradeTone() for a
+# small, closed, enum-driven set.
+_REASON_PHRASE = {
+    "MODULE_TIMEOUT": "the check timed out",
+    "CONNECTION_REFUSED": "the connection was refused",
+    "CONNECTION_RESET": "the connection was reset partway through",
+    "TLS_ERROR": "the TLS connection could not be established",
+    "TOO_MANY_REDIRECTS": "it followed too many redirects",
+    "BLOCKED_REDIRECT_TARGET": "it was redirected somewhere we don't permit connecting to",
+    "HTTP_ERROR": "the request could not be completed",
+}
+
+
+def _join_labels(labels: list[str]) -> str:
+    if len(labels) <= 1:
+        return "".join(labels)
+    if len(labels) == 2:
+        return f"{labels[0]} and {labels[1]}"
+    return f"{', '.join(labels[:-1])} and {labels[-1]}"
+
 
 def _esc(value: object | None) -> str:
     if value is None:
@@ -101,7 +128,12 @@ def _docs_url(docs_path: str) -> str:
 
 
 def _grade_row_html(
-    grade: str | None, score: int | None, size_class: str, cap_reason: str | None = None
+    grade: str | None,
+    score: int | None,
+    size_class: str,
+    cap_reason: str | None = None,
+    *,
+    is_complete: bool | None = True,
 ) -> str:
     # §9 Step 4b (v3.0): `grade`/`score` are null exactly when `certificate`
     # didn't complete — "Incomplete", never a letter and never blank space
@@ -114,7 +146,18 @@ def _grade_row_html(
             "</div>"
         )
     tone = _GRADE_TONE.get(grade, "alert")
-    score_html = f'<span class="cover-score">Score {score}/100</span>' if score is not None else ""
+    # docs/Fix headers and incomplete.md §4.2: a module that didn't run
+    # contributes nothing to the score and its weight redistributes to the
+    # modules that did — the number is biased upward by an unknown amount.
+    # "{score} or lower" over suppressing it entirely, same choice and same
+    # reasoning as GradeDial.tsx's scoreIsCeiling — see that component's
+    # docstring for why.
+    if score is None:
+        score_html = ""
+    elif is_complete is False:
+        score_html = f'<span class="cover-score">Score {score} or lower</span>'
+    else:
+        score_html = f'<span class="cover-score">Score {score}/100</span>'
     # §9 Step 4 (v3.1): the letter and the score can legitimately disagree
     # (a critical finding or 2+ highs cap the letter below its own band) —
     # shown right under the dial so a reader never has to reconcile "C ·
@@ -136,11 +179,23 @@ def _grade_row_html(
 def _incomplete_banner_html(scan: Scan) -> str:
     if scan.is_complete is not False:
         return ""
-    count = len(scan.incomplete_modules or [])
+    incomplete = scan.incomplete_modules or []
+    results: list[ModuleResult[Any] | None] = [
+        getattr(scan.modules, name.value) for name in incomplete
+    ]
+    labels = [
+        result.label if result is not None else name.value
+        for name, result in zip(incomplete, results, strict=True)
+    ]
+    reason = None
+    if len(results) == 1 and results[0] is not None and results[0].error is not None:
+        reason = _REASON_PHRASE.get(results[0].error.code)
+    reason_html = f" — {_esc(reason)}" if reason else ""
+    names = _esc(_join_labels(labels))
     return (
         '<div class="incomplete-banner">'
-        f"<strong>{count} of 7 checks did not complete.</strong> "
-        "This assessment is partial and should not be treated as a clean result."
+        f"<strong>{len(incomplete)} of 7 checks did not complete: {names}.</strong> "
+        f"This assessment is partial and should not be treated as a clean result{reason_html}."
         "</div>"
     )
 
@@ -162,7 +217,13 @@ def _cover_html(scan: Scan) -> str:
   <p class="cover-hostname mono">{_esc(scan.hostname)}</p>
   <p class="cover-timestamp mono">Scanned {_format_datetime_ist(scanned_at)}</p>
   <div class="cover-grade-row">
-    {_grade_row_html(scan.overall_grade, scan.overall_score, "cover-grade", scan.grade_cap_reason)}
+    {_grade_row_html(
+        scan.overall_grade,
+        scan.overall_score,
+        "cover-grade",
+        scan.grade_cap_reason,
+        is_complete=scan.is_complete,
+    )}
   </div>
   {headline_html}
   <p class="cover-disclaimer">
@@ -201,7 +262,17 @@ def _modules_table_html(scan: Scan) -> str:
         result: ModuleResult[Any] | None = getattr(scan.modules, name.value)
         label = result.label if result is not None else name.value.replace("_", " ").title()
         grade = result.grade if result is not None else None
-        summary = result.summary if result is not None else "Not available for this scan."
+        # docs/Fix headers and incomplete.md §4.3: a failed module's generic
+        # summary ("This check did not complete — try scanning again.") told
+        # a reader nothing they didn't already know from the grade column's
+        # "—". Show the actual reason (contract v3.4 ModuleResult.error)
+        # instead, when there is one.
+        if result is not None and result.error is not None:
+            summary = result.error.message
+        elif result is not None:
+            summary = result.summary
+        else:
+            summary = "Not available for this scan."
         tone = _GRADE_TONE.get(grade or "")
         grade_html = (
             f'<span class="module-grade grade-{tone}">{_esc(grade)}</span>'
@@ -221,7 +292,11 @@ def _modules_table_html(scan: Scan) -> str:
 
 def _executive_summary_html(scan: Scan) -> str:
     grade_row = _grade_row_html(
-        scan.overall_grade, scan.overall_score, "summary-grade", scan.grade_cap_reason
+        scan.overall_grade,
+        scan.overall_score,
+        "summary-grade",
+        scan.grade_cap_reason,
+        is_complete=scan.is_complete,
     )
     return f"""
 <section class="section">

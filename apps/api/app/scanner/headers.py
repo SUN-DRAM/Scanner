@@ -4,12 +4,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 
 from app.enums import ModuleName
 from app.findings import build_finding
 from app.grading import module_summary
-from app.safety import SafeFetchResult, safe_get
+from app.safety import HTTP_REDIRECT_PROBE_TIMEOUT_SECONDS, SafeFetchResult, safe_get
 from app.scanner import ScanContext, run_module
 from app.schemas import Finding, HeaderPresence, HeadersData, HstsData, ModuleResult
 
@@ -39,10 +40,16 @@ def _parse_hsts(value: str | None) -> HstsData:
 
 
 async def _detect(ctx: ScanContext) -> tuple[HeadersData, list[Finding], str]:
+    # docs/Fix headers and incomplete.md: this probe only powers the
+    # NO_HTTPS_REDIRECT finding, so it gets its own short, independent
+    # budget (HTTP_REDIRECT_PROBE_TIMEOUT_SECONDS) — a dead port 80 must
+    # never be allowed to starve the HTTPS probe below of the module's
+    # shared PER_MODULE_TIMEOUT_SECONDS window.
     http_result: SafeFetchResult | None = None
     try:
-        http_result = await safe_get(
-            "http", ctx.hostname, 80, "/", allow_redirect_probe_port_80=True
+        http_result = await asyncio.wait_for(
+            safe_get("http", ctx.hostname, 80, "/", allow_redirect_probe_port_80=True),
+            timeout=HTTP_REDIRECT_PROBE_TIMEOUT_SECONDS,
         )
     except Exception:
         http_result = None

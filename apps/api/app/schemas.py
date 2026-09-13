@@ -26,6 +26,7 @@ from app.enums import (
     Grade,
     InvoiceState,
     LifetimePhase,
+    ModuleErrorCode,
     ModuleName,
     ModuleStatus,
     MonitorState,
@@ -265,6 +266,19 @@ class Finding(ContractModel):
 ModuleDataT = TypeVar("ModuleDataT", bound=BaseModel)
 
 
+class ModuleError(ContractModel):
+    """v3.4 (docs/Fix headers and incomplete.md): a structured, safe reason
+    a module has `status: "error"` — `code` from the closed
+    `ModuleErrorCode` set, `message` plain-language and user-facing. Never a
+    traceback, internal hostname, or library name — those go to the
+    application log only, against the module and hostname, never this
+    field. `app/safety.py`'s `classify_module_exception` is the one place
+    an exception is turned into a `code`."""
+
+    code: ModuleErrorCode
+    message: str
+
+
 class ModuleResult(ContractModel, Generic[ModuleDataT]):
     module: ModuleName
     status: ModuleStatus
@@ -276,7 +290,9 @@ class ModuleResult(ContractModel, Generic[ModuleDataT]):
     duration_ms: int
     findings: list[Finding]
     data: ModuleDataT | None
-    error: str | None
+    # v3.4: structured (ModuleError), not a bare string — was `str | None`
+    # (the raw `str(exc)`) before this amendment.
+    error: ModuleError | None
 
 
 class Modules(ContractModel):

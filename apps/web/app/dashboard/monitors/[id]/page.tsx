@@ -147,7 +147,8 @@ export default async function MonitorDetailPage({ params }: MonitorDetailPagePro
           <>
             {scan.is_complete === false ? (
               <IncompleteAssessmentBanner
-                incompleteModuleCount={scan.incomplete_modules?.length ?? 0}
+                incompleteModules={scan.incomplete_modules ?? []}
+                modules={scan.modules}
               />
             ) : null}
             <ScanGradeHeader
@@ -155,6 +156,7 @@ export default async function MonitorDetailPage({ params }: MonitorDetailPagePro
               score={scan.overall_score}
               headline={scan.headline}
               gradeCapReason={scan.grade_cap_reason}
+              isComplete={scan.is_complete}
               className="mb-8 border-b border-line pb-8"
             />
             <ScanResultBody scan={scan} />

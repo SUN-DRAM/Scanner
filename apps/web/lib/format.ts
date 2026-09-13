@@ -96,6 +96,35 @@ export function formatDateTimeDisplay(iso: string): string {
   }).format(date)} UTC`;
 }
 
+/**
+ * docs/Fix headers and incomplete.md §5: the public scan report and the PDF
+ * report *of the same scan* showed two different times for it ("15:37 UTC"
+ * vs. "... IST (UTC+05:30)") — this product's own market is India (CLAUDE.md
+ * "founders and agencies in India"), so IST with the offset shown is the
+ * standard, matching `app/pdf/template.py`'s `_format_datetime_ist` exactly
+ * ("12 Sep 2026, 15:30 IST (UTC+05:30)"). Deliberately scoped to the "this
+ * scan was run at" timestamp both documents share — `formatDateTimeDisplay`
+ * above is untouched for its other callers (admin ops pages, alert-event
+ * timestamps), which aren't the "two documents about the same scan
+ * disagree" problem this closes and weren't asked about.
+ */
+export function formatDateTimeDisplayIst(iso: string): string {
+  const date = new Date(iso);
+  const datePart = new Intl.DateTimeFormat("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: "Asia/Kolkata",
+  }).format(date);
+  const timePart = new Intl.DateTimeFormat("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Kolkata",
+  }).format(date);
+  return `${datePart}, ${timePart} IST (UTC+05:30)`;
+}
+
 export function formatIsoDateDisplay(isoDate: string): string {
   // isoDate is a plain "YYYY-MM-DD" (contract's IsoDate), not a datetime —
   // parse it as UTC explicitly so it doesn't shift a day in another timezone.

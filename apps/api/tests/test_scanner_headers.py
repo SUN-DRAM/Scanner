@@ -73,6 +73,27 @@ async def test_swiggy_com_headers_are_read_from_the_final_hop(require_internet: 
     assert not any(f.code == "NO_HTTPS_REDIRECT" for f in result.findings)
 
 
+# --- docs/Fix headers and incomplete.md: HTTP redirect-probe starvation ---
+
+
+@pytest.mark.asyncio
+async def test_letshego_com_completes_despite_a_dead_port_80(require_internet: None) -> None:
+    # letshego.com's port 80 silently black-holes every TCP connect attempt
+    # (no RST, no response at all) — the HTTP redirect probe used to consume
+    # the entire module timeout getting there, starving the otherwise-fast,
+    # working HTTPS probe and taking the whole module down as status=error.
+    result = await run(_ctx("letshego.com"))
+    assert result.status.value != "error"
+    assert result.error is None
+    assert result.data is not None
+    assert result.data.status_code == 200
+    assert result.data.final_url.startswith("https://")
+    # Port 80 never responding means we genuinely can't confirm a redirect —
+    # that's an honest, real NO_HTTPS_REDIRECT finding, not a scanner bug.
+    assert result.data.http_to_https_redirect is False
+    assert any(f.code == "NO_HTTPS_REDIRECT" for f in result.findings)
+
+
 @pytest.mark.asyncio
 async def test_flipkart_com_reaches_the_real_origin_not_a_waf_challenge(
     require_internet: None,

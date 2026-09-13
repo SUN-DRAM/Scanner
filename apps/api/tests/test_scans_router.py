@@ -24,6 +24,7 @@ from app.enums import ModuleStatus, ScanStatus
 from app.main import app
 from app.models import ScanRecord
 from app.redis_client import get_arq_pool, get_redis_client
+from app.schemas import ModuleError
 from tests.conftest import FakeArqPool
 from tests.pdf_fixtures import default_modules, make_completed_scan
 
@@ -392,5 +393,68 @@ async def test_get_scan_by_id_reports_an_incomplete_scan(
         assert body["overall_score"] is None
         assert body["is_complete"] is False
         assert "certificate" in body["incomplete_modules"]
+    finally:
+        await _cleanup(db_session, hostname)
+
+
+@pytest.mark.asyncio
+async def test_get_scan_by_id_serialises_the_structured_module_error(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """docs/Fix headers and incomplete.md §6.2 v3.4: a failed module's
+    `error` is a structured {code, message} object in the live JSON response
+    — not just asserted on the Python object before serialisation, but
+    round-tripped through the real DB row and the real FastAPI response
+    model, the way an actual client would receive it. Also the specific
+    check the doc's own verification list asks for: no traceback, internal
+    hostname, or library name anywhere in the body."""
+    hostname = _test_hostname()
+    modules = default_modules()
+    modules.headers.status = ModuleStatus.ERROR
+    modules.headers.data = None
+    modules.headers.score = None
+    modules.headers.grade = None
+    modules.headers.error = ModuleError(
+        code="MODULE_TIMEOUT",
+        message="The security headers check timed out after 8 seconds.",
+    )
+    scan = make_completed_scan(
+        hostname=hostname,
+        overall_grade="B",
+        overall_score=81,
+        modules=modules,
+        is_complete=False,
+        incomplete_modules=["headers"],
+    )
+    record = ScanRecord(
+        scan_id=uuid.UUID(scan.scan_id),
+        public_slug=scan.public_slug,
+        hostname=hostname,
+        port=443,
+        status=ScanStatus.COMPLETED.value,
+        overall_grade=scan.overall_grade,
+        overall_score=scan.overall_score,
+        headline=scan.headline,
+        result=scan.model_dump(mode="json"),
+        completed_at=scan.completed_at,
+        client_ip_hash="deadbeef",
+    )
+    db_session.add(record)
+    await db_session.commit()
+    try:
+        response = await client.get(f"/api/v1/scans/{record.scan_id}")
+        assert response.status_code == 200
+        body = response.json()
+        headers_error = body["modules"]["headers"]["error"]
+        assert headers_error == {
+            "code": "MODULE_TIMEOUT",
+            "message": "The security headers check timed out after 8 seconds.",
+        }
+        # Not the scan's own target hostname (legitimately in the body —
+        # that's the report's whole subject) — internal implementation
+        # details that must never reach a stranger's browser.
+        raw = response.text
+        for leaked in ("Traceback", 'File "', "httpx", "httpcore", "asyncio", "postgres", "redis"):
+            assert leaked not in raw, f"{leaked!r} leaked into the API response"
     finally:
         await _cleanup(db_session, hostname)

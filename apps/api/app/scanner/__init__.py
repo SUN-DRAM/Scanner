@@ -6,6 +6,7 @@ one place rather than being re-implemented seven times.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -14,12 +15,31 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
-from app.enums import ModuleName, ModuleStatus
+from app.enums import ModuleErrorCode, ModuleName, ModuleStatus
 from app.grading import grade_module, score_module, status_for_findings
-from app.safety import PER_MODULE_TIMEOUT_SECONDS
-from app.schemas import Finding, ModuleResult
+from app.safety import PER_MODULE_TIMEOUT_SECONDS, classify_module_exception
+from app.schemas import Finding, ModuleError, ModuleResult
+
+logger = logging.getLogger("app.scanner")
 
 DataT = TypeVar("DataT", bound=BaseModel)
+
+# v3.4 (docs/Fix headers and incomplete.md): the user-facing message for
+# every code except MODULE_TIMEOUT, which needs the module's own label and
+# actual timeout value — built inline in run_module instead. Deliberately
+# generic and safe: no hostname, no library name, no stack detail. The full
+# exception always goes to the application log (below), never here.
+_MODULE_ERROR_MESSAGES: dict[ModuleErrorCode, str] = {
+    ModuleErrorCode.CONNECTION_REFUSED: "The connection was refused.",
+    ModuleErrorCode.CONNECTION_RESET: "The connection was reset partway through.",
+    ModuleErrorCode.TLS_ERROR: "The TLS connection could not be established.",
+    ModuleErrorCode.TOO_MANY_REDIRECTS: "This check followed too many redirects.",
+    ModuleErrorCode.BLOCKED_REDIRECT_TARGET: (
+        "This check followed a redirect to a target it is not permitted to connect to."
+    ),
+    ModuleErrorCode.HTTP_ERROR: "The request could not be completed.",
+    ModuleErrorCode.UNEXPECTED_ERROR: "This check did not complete. Try scanning again.",
+}
 
 
 @dataclass(frozen=True)
@@ -57,6 +77,25 @@ async def run_module(
         data, findings, summary = await asyncio.wait_for(detect(ctx), timeout=timeout)
     except Exception as exc:
         duration_ms = int((time.perf_counter() - started) * 1000)
+        # v3.4: the full exception — type, message, traceback — is for the
+        # application log only, correlated by module and hostname (this
+        # runs in the arq worker, outside any HTTP request, so there is no
+        # per-request request_id to attach here). ModuleResult.error below
+        # carries only a closed code and a safe, generic message; nothing
+        # from this log line ever reaches the API response.
+        logger.exception(
+            "module_failed",
+            # "module" collides with LogRecord's own built-in attribute of
+            # that name and raises inside the logging call itself — not a
+            # hypothetical, this took the exception-logging path down with
+            # it until a test actually exercised it.
+            extra={"scan_module": module.value, "hostname": ctx.hostname, "port": ctx.port},
+        )
+        code = classify_module_exception(exc)
+        if code == ModuleErrorCode.MODULE_TIMEOUT:
+            message = f"The {label.lower()} check timed out after {timeout:g} seconds."
+        else:
+            message = _MODULE_ERROR_MESSAGES[code]
         return ModuleResult(
             module=module,
             status=ModuleStatus.ERROR,
@@ -68,7 +107,7 @@ async def run_module(
             duration_ms=duration_ms,
             findings=[],
             data=None,
-            error=str(exc) or exc.__class__.__name__,
+            error=ModuleError(code=code, message=message),
         )
 
     duration_ms = int((time.perf_counter() - started) * 1000)

@@ -18,6 +18,7 @@ from app.config import get_settings
 from app.pdf.filename import build_report_filename, sanitize_hostname_for_filename
 from app.pdf.renderer import render_scan_pdf_bytes
 from app.pdf.template import render_html
+from app.schemas import ModuleError
 from tests.pdf_fixtures import (
     NOW,
     default_modules,
@@ -368,3 +369,98 @@ class TestGradeCapReason:
         document = render_html(scan)
         assert 'class="grade-cap-reason"' not in document
         assert "capped by" not in document
+
+
+class TestIncompleteAssessmentPresentation:
+    """docs/Fix headers and incomplete.md §4 — a partial scan (certificate
+    completed, some other module didn't) must name which check failed and
+    why (§4.1), never show a precise score the data doesn't support (§4.2),
+    and show the module card's own failure reason, not a dash (§4.3)."""
+
+    def test_banner_names_the_single_incomplete_module_and_its_reason(self) -> None:
+        modules = default_modules()
+        modules.headers.status = "error"
+        modules.headers.data = None
+        modules.headers.score = None
+        modules.headers.grade = None
+        modules.headers.error = ModuleError(
+            code="MODULE_TIMEOUT",
+            message="The security headers check timed out after 8 seconds.",
+        )
+        scan = make_completed_scan(
+            overall_grade="B",
+            overall_score=81,
+            modules=modules,
+            is_complete=False,
+            incomplete_modules=["headers"],
+        )
+        document = render_html(scan)
+        assert "1 of 7 checks did not complete: Security headers." in document
+        assert "should not be treated as a clean result — the check timed out." in document
+
+    def test_banner_omits_the_reason_when_several_modules_are_incomplete(self) -> None:
+        modules = default_modules()
+        for name in ("headers", "dns"):
+            result = getattr(modules, name)
+            result.status = "error"
+            result.data = None
+            result.score = None
+            result.grade = None
+            result.error = ModuleError(code="MODULE_TIMEOUT", message="Timed out.")
+        scan = make_completed_scan(
+            overall_grade="B",
+            overall_score=75,
+            modules=modules,
+            is_complete=False,
+            incomplete_modules=["headers", "dns"],
+        )
+        document = render_html(scan)
+        assert "2 of 7 checks did not complete: Security headers and DNS." in document
+        assert "— the check timed out" not in document
+
+    def test_score_renders_as_a_ceiling_not_a_precise_number(self) -> None:
+        modules = default_modules()
+        modules.headers.status = "error"
+        modules.headers.data = None
+        modules.headers.score = None
+        modules.headers.grade = None
+        modules.headers.error = ModuleError(code="MODULE_TIMEOUT", message="Timed out.")
+        scan = make_completed_scan(
+            overall_grade="B",
+            overall_score=81,
+            modules=modules,
+            is_complete=False,
+            incomplete_modules=["headers"],
+        )
+        document = render_html(scan)
+        # Appears on both the cover and the executive summary.
+        assert document.count("Score 81 or lower") == 2
+        assert "81/100" not in document
+
+    def test_a_complete_scan_still_shows_a_precise_score(self) -> None:
+        scan = make_completed_scan(overall_grade="A+", overall_score=98)
+        document = render_html(scan)
+        assert "98/100" in document
+        assert "or lower" not in document
+
+    def test_module_table_shows_the_actual_reason_not_the_generic_summary(self) -> None:
+        modules = default_modules()
+        modules.headers.status = "error"
+        modules.headers.data = None
+        modules.headers.score = None
+        modules.headers.grade = None
+        modules.headers.summary = "This check did not complete — try scanning again."
+        modules.headers.error = ModuleError(
+            code="MODULE_TIMEOUT",
+            message="The security headers check timed out after 8 seconds.",
+        )
+        scan = make_completed_scan(
+            overall_grade="B",
+            overall_score=81,
+            modules=modules,
+            is_complete=False,
+            incomplete_modules=["headers"],
+        )
+        document = render_html(scan)
+        assert "The security headers check timed out after 8 seconds." in document
+        assert "This check did not complete — try scanning again." not in document

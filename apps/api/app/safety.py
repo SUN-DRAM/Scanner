@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import ipaddress
 import re
 import select
@@ -25,6 +26,7 @@ import idna
 from cryptography import x509
 from OpenSSL import SSL as openssl_ssl
 
+from app.enums import ModuleErrorCode
 from app.errors import ApiException, ErrorCode
 
 # --- §7.2 hostname normalisation ---
@@ -292,6 +294,20 @@ PER_MODULE_TIMEOUT_SECONDS = 8.0
 # ignores a renegotiation request — the normal, hardened-server behavior,
 # not an edge case — never answers at all, and there is nothing to wait for.
 RENEGOTIATION_PROBE_TIMEOUT_SECONDS = 2.0
+
+# headers.py's plaintext HTTP probe (port 80, for the NO_HTTPS_REDIRECT
+# finding only): capped separately from PER_MODULE_TIMEOUT_SECONDS for the
+# same reason as the renegotiation probe above — a server with nothing
+# listening on 80 doesn't refuse the connection, it silently black-holes it
+# (docs/Fix headers and incomplete.md, letshego.com: `curl -v` sits at
+# "Trying <ip>:80..." for the full timeout, no SYN-ACK, no RST). Without its
+# own shorter budget, that dead port-80 connect alone was consuming this
+# probe's entire share of PER_MODULE_TIMEOUT_SECONDS, leaving nothing for
+# the HTTPS probe that the module actually depends on — even though that
+# HTTPS probe succeeds in well under a second on its own. The HTTP probe is
+# a nice-to-have (one finding); the HTTPS probe is everything else the
+# module reports, so it must never be starved by this one's failure mode.
+HTTP_REDIRECT_PROBE_TIMEOUT_SECONDS = 3.0
 
 
 async def open_pinned_connection(
@@ -578,8 +594,26 @@ async def safe_get(
     body = b""
 
     for _ in range(max_redirects + 1):
-        validate_port(current_port, allow_redirect_probe_port_80=allow_redirect_probe_port_80)
-        target = await resolve_and_validate(current_hostname)
+        try:
+            validate_port(current_port, allow_redirect_probe_port_80=allow_redirect_probe_port_80)
+            target = await resolve_and_validate(current_hostname)
+        except (ApiException, HostnameResolutionError):
+            # docs/Fix headers and incomplete.md: a redirect landing on a
+            # disallowed port/host (tls-v1-0.badssl.com:443 -> :1010, a real,
+            # observed case) is a safety stop, not a fetch failure — if a
+            # prior hop already succeeded, report that rather than
+            # discarding it ("degrade to reporting what it did observe").
+            # The very first hop has nothing to fall back to, so it still
+            # raises — a directly-disallowed target is a genuine error.
+            if response is not None:
+                return SafeFetchResult(
+                    final_url=redirect_chain[-1],
+                    status_code=response.status_code,
+                    headers=response.headers,
+                    body=body,
+                    redirect_chain=redirect_chain,
+                )
+            raise
         url = f"{current_scheme}://{current_hostname}:{current_port}{current_path}"
         redirect_chain.append(url)
 
@@ -609,10 +643,15 @@ async def safe_get(
             next_url = urljoin(url, location)
             parsed = urlsplit(next_url)
             if parsed.scheme not in ("http", "https"):
-                raise ApiException(
-                    ErrorCode.BLOCKED_TARGET,
-                    "Redirect target uses a disallowed scheme.",
-                    {"location": location},
+                # Same "degrade to what we observed" rule as the port/host
+                # check above — this hop's response is real and already in
+                # hand, only the *next* one is disallowed.
+                return SafeFetchResult(
+                    final_url=url,
+                    status_code=response.status_code,
+                    headers=response.headers,
+                    body=body,
+                    redirect_chain=redirect_chain,
                 )
             current_scheme = parsed.scheme
             current_hostname = parsed.hostname or current_hostname
@@ -641,3 +680,67 @@ async def safe_get(
         body=body,
         redirect_chain=redirect_chain,
     )
+
+
+# --- §6.2 ModuleResult.error classification (v3.4, docs/Fix headers and
+# incomplete.md) ---
+
+_REFUSED_ERRNOS = frozenset({errno.ECONNREFUSED})
+_RESET_ERRNOS = frozenset({errno.ECONNRESET, errno.EPIPE})
+
+
+def classify_module_exception(exc: Exception) -> ModuleErrorCode:
+    """Maps an exception caught at a module boundary (`app/scanner/__init__.py`'s
+    `run_module`) to one of the closed `ModuleErrorCode` set. Every exception
+    type this scanner's own connection helpers — `safe_get` above,
+    `open_pinned_connection`, `open_pinned_tls_handshake` — are known to
+    raise gets a specific code; anything else falls back to
+    `UNEXPECTED_ERROR` honestly rather than guessing at a more specific one.
+
+    Deliberately returns only the code, never a message: the caller already
+    has context (the module's own label, the timeout it was given) that
+    produces a better message than this function could build in isolation,
+    and the *safe* generic messages for the other codes belong next to where
+    they're shown, not buried in a classifier.
+    """
+    if isinstance(exc, TimeoutError | httpx.TimeoutException):
+        # Covers asyncio.TimeoutError (an alias of TimeoutError since
+        # Python 3.11 — both run_module's own outer wait_for and the raw
+        # pinned-connection helpers raise this), plus httpx's
+        # ConnectTimeout/ReadTimeout/WriteTimeout/PoolTimeout.
+        return ModuleErrorCode.MODULE_TIMEOUT
+
+    if isinstance(exc, ApiException) and exc.code == ErrorCode.BLOCKED_TARGET:
+        return ModuleErrorCode.BLOCKED_REDIRECT_TARGET
+    if isinstance(exc, HostnameResolutionError):
+        # A hostname that resolved when the scan started but stopped
+        # resolving by the time this hop ran (DNS TTL expiry mid-scan,
+        # DNS rebinding) — the same "target became unsafe/unreachable
+        # between requests" family as the disallowed-port/scheme case above.
+        return ModuleErrorCode.BLOCKED_REDIRECT_TARGET
+
+    if isinstance(exc, httpx.TooManyRedirects):
+        return ModuleErrorCode.TOO_MANY_REDIRECTS
+
+    # httpx wraps the underlying OSError as __cause__ rather than raising it
+    # directly; the raw pinned-connection helpers (safety.py's own
+    # _do_pinned_tls_handshake, open_pinned_connection) raise it directly.
+    # Checking both the exception itself and its cause covers either path
+    # without needing to know which one produced it.
+    cause = exc.__cause__ if isinstance(exc, httpx.TransportError) else exc
+    if isinstance(exc, ConnectionRefusedError) or (
+        isinstance(cause, OSError) and cause.errno in _REFUSED_ERRNOS
+    ):
+        return ModuleErrorCode.CONNECTION_REFUSED
+    if isinstance(exc, ConnectionResetError | BrokenPipeError) or (
+        isinstance(cause, OSError) and cause.errno in _RESET_ERRNOS
+    ):
+        return ModuleErrorCode.CONNECTION_RESET
+
+    if isinstance(exc, ssl.SSLError | openssl_ssl.Error):
+        return ModuleErrorCode.TLS_ERROR
+
+    if isinstance(exc, httpx.TransportError | OSError):
+        return ModuleErrorCode.HTTP_ERROR
+
+    return ModuleErrorCode.UNEXPECTED_ERROR

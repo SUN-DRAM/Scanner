@@ -10,7 +10,7 @@ import { ScanProgress } from "@/components/scan/ScanProgress";
 import { ScanResultBody } from "@/components/scan/ScanResultBody";
 import { WaitlistForm } from "@/components/scan/WaitlistForm";
 import { pollScan, ScanPollTimeoutError } from "@/lib/api";
-import { formatDateTimeDisplay } from "@/lib/format";
+import { formatDateTimeDisplayIst } from "@/lib/format";
 import type { Scan } from "@/types/contract";
 
 interface ScanResultViewProps {
@@ -70,7 +70,8 @@ export function ScanResultView({ initialScan }: ScanResultViewProps) {
     <main className="mx-auto max-w-content px-4 py-12">
       {scan.is_complete === false ? (
         <IncompleteAssessmentBanner
-          incompleteModuleCount={scan.incomplete_modules?.length ?? 0}
+          incompleteModules={scan.incomplete_modules ?? []}
+          modules={scan.modules}
         />
       ) : null}
       <section className="flex flex-col items-center gap-4 border-b border-line pb-10 text-center">
@@ -80,10 +81,11 @@ export function ScanResultView({ initialScan }: ScanResultViewProps) {
           score={scan.overall_score}
           headline={scan.headline}
           gradeCapReason={scan.grade_cap_reason}
+          isComplete={scan.is_complete}
           headingLevel={1}
         />
         <p className="font-mono text-xs text-ink-muted">
-          Scanned {formatDateTimeDisplay(scannedAt)}
+          Scanned {formatDateTimeDisplayIst(scannedAt)}
         </p>
         <DownloadReportButton scanId={scan.scan_id} />
         <WaitlistForm scanId={scan.scan_id} hostname={scan.hostname} />

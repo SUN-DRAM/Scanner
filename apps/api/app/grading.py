@@ -224,14 +224,26 @@ def grade_cap_reason(
        amendment: `"capped by {n} critical-severity finding(s)"`.
     2. Otherwise, `overall_score` came from the scan-wide severity budget
        (`compute_global_score`) rather than the diluted per-module weighted
-       mean — worth surfacing even though the letter and the score agree,
+       mean *and that actually cost the scan a band* — worth surfacing
        since it explains *why* the score is lower than a reader averaging
        the module grades in their head would expect:
        `"reduced by {n} {severity}-severity finding(s)"`, naming whichever
        severity tier is actually present, highest first.
 
-    `None` when neither applies — the letter matches its own band and nothing
-    but the ordinary weighted mean produced the number.
+    `None` when neither applies — the letter matches its own band and
+    nothing but the ordinary weighted mean produced the number.
+
+    docs/Fix headers and incomplete.md §5: case 2 used to fire whenever the
+    budget was merely lower than the weighted mean, even when both still
+    banded the same — sundram.tech's own report once read "A+ · Score
+    98/100 · A+ — reduced by 2 low-severity findings", undercutting a report
+    that was, band-for-band, still a clean A+. The budget being lower than
+    the weighted mean is common and usually harmless; only surface it when
+    it actually pulled the letter down from where dilution alone would have
+    landed it — `grade_for_score(global_score)
+    != grade_for_score(weighted_score)`. This also covers "never for A+"
+    without a special case: `overall_score` bands to A+ only when both
+    inputs are already >= 95, so the two bands can never differ there.
     """
     cap_relevant = _grade_cap_relevant(all_findings)
     banded = grade_for_score(overall_score)
@@ -241,7 +253,9 @@ def grade_cap_reason(
         noun = "finding" if critical_count == 1 else "findings"
         return f"capped by {critical_count} critical-severity {noun}"
 
-    if global_score < weighted_score:
+    if global_score < weighted_score and grade_for_score(global_score) != grade_for_score(
+        weighted_score
+    ):
         for severity, label in _SEVERITY_REASON_LABELS:
             count = sum(1 for finding in cap_relevant if finding.severity == severity)
             if count:

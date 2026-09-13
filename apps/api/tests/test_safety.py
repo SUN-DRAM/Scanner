@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
+import errno
 import ipaddress
+import ssl
 
+import httpx
 import pytest
+from OpenSSL import SSL as openssl_ssl
 
+from app.enums import ModuleErrorCode
 from app.errors import ApiException, ErrorCode
 from app.safety import (
+    HTTP_REDIRECT_PROBE_TIMEOUT_SECONDS,
     PER_MODULE_TIMEOUT_SECONDS,
     RENEGOTIATION_PROBE_TIMEOUT_SECONDS,
     SCANNER_USER_AGENT,
     HostnameResolutionError,
+    classify_module_exception,
     is_blocked_ip,
     is_denylisted_hostname,
     normalize_hostname,
     resolve_and_validate,
+    safe_get,
     validate_port,
 )
 
@@ -225,3 +233,75 @@ def test_scanner_user_agent_is_not_the_httpx_default() -> None:
     # with python-httpx" is the stable, version-independent thing to assert.
     assert not SCANNER_USER_AGENT.startswith("python-httpx")
     assert "Mozilla" in SCANNER_USER_AGENT
+
+
+# --- docs/Fix headers and incomplete.md: HTTP redirect-probe starvation ---
+
+
+def test_http_redirect_probe_timeout_is_well_under_the_module_budget() -> None:
+    # Regression guard for the letshego.com finding: port 80 silently
+    # black-holing the TCP connect (no RST, no response — not a fast
+    # refusal) must not be able to consume the module's entire timeout
+    # budget before the unrelated, working HTTPS probe even gets a turn.
+    assert HTTP_REDIRECT_PROBE_TIMEOUT_SECONDS < PER_MODULE_TIMEOUT_SECONDS / 2
+
+
+@pytest.mark.asyncio
+async def test_safe_get_degrades_gracefully_on_a_redirect_to_a_disallowed_port(
+    require_internet: None,
+) -> None:
+    # Regression guard for the tls-v1-0.badssl.com finding: badssl.com's own
+    # infrastructure genuinely redirects :443 -> :1010 for this fixture, a
+    # port outside contract §10's allowlist. The old behaviour discarded the
+    # real, already-fetched :443 response and raised, taking the whole
+    # headers module down. The redirect target being disallowed must stop
+    # the chain and return what was actually observed, not blow up the call.
+    result = await safe_get("https", "tls-v1-0.badssl.com", 443, "/")
+    assert result.final_url == "https://tls-v1-0.badssl.com:443/"
+    assert result.status_code == 301
+    assert result.headers.get("location") == "https://tls-v1-0.badssl.com:1010/"
+
+
+# --- docs/Fix headers and incomplete.md Step 3: classify_module_exception ---
+
+
+def _with_cause(exc: Exception, cause: BaseException) -> Exception:
+    exc.__cause__ = cause
+    return exc
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        # asyncio.TimeoutError is an alias of the builtin TimeoutError since
+        # Python 3.11 — one case covers both.
+        (TimeoutError("boom"), ModuleErrorCode.MODULE_TIMEOUT),
+        (httpx.ConnectTimeout("boom"), ModuleErrorCode.MODULE_TIMEOUT),
+        (httpx.ReadTimeout("boom"), ModuleErrorCode.MODULE_TIMEOUT),
+        (httpx.PoolTimeout("boom"), ModuleErrorCode.MODULE_TIMEOUT),
+        (
+            ApiException(ErrorCode.BLOCKED_TARGET, "nope", None),
+            ModuleErrorCode.BLOCKED_REDIRECT_TARGET,
+        ),
+        (HostnameResolutionError("example.com"), ModuleErrorCode.BLOCKED_REDIRECT_TARGET),
+        (httpx.TooManyRedirects("boom"), ModuleErrorCode.TOO_MANY_REDIRECTS),
+        (ConnectionRefusedError(), ModuleErrorCode.CONNECTION_REFUSED),
+        (
+            _with_cause(httpx.ConnectError("boom"), OSError(errno.ECONNREFUSED, "refused")),
+            ModuleErrorCode.CONNECTION_REFUSED,
+        ),
+        (ConnectionResetError(), ModuleErrorCode.CONNECTION_RESET),
+        (BrokenPipeError(), ModuleErrorCode.CONNECTION_RESET),
+        (
+            _with_cause(httpx.ReadError("boom"), OSError(errno.ECONNRESET, "reset")),
+            ModuleErrorCode.CONNECTION_RESET,
+        ),
+        (ssl.SSLError("boom"), ModuleErrorCode.TLS_ERROR),
+        (openssl_ssl.Error("boom"), ModuleErrorCode.TLS_ERROR),
+        (httpx.RemoteProtocolError("boom"), ModuleErrorCode.HTTP_ERROR),
+        (OSError("some other os error"), ModuleErrorCode.HTTP_ERROR),
+        (ValueError("nothing to do with networking"), ModuleErrorCode.UNEXPECTED_ERROR),
+    ],
+)
+def test_classify_module_exception(exc: Exception, expected: ModuleErrorCode) -> None:
+    assert classify_module_exception(exc) == expected

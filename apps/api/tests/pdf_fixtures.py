@@ -27,6 +27,7 @@ from app.schemas import (
     HeadersData,
     HstsData,
     KeyExchangeData,
+    ModuleError,
     ModuleResult,
     Modules,
     ProtocolSupport,
@@ -205,6 +206,7 @@ def make_module_result(
     summary: str,
     data: Any,
     findings: list[Finding] | None = None,
+    error: ModuleError | None = None,
 ) -> ModuleResult[Any]:
     return ModuleResult(
         module=module,
@@ -217,7 +219,7 @@ def make_module_result(
         duration_ms=250,
         findings=findings or [],
         data=data,
-        error=None,
+        error=error,
     )
 
 

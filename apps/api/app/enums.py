@@ -28,6 +28,23 @@ class Severity(StrEnum):
     INFO = "info"
 
 
+class ModuleErrorCode(StrEnum):
+    """v3.4 (docs/Fix headers and incomplete.md, §6.2 `ModuleResult.error`):
+    the closed set of reasons a module can fail to complete. Classified from
+    the caught exception in `app/scanner/__init__.py`'s `run_module`, using
+    `app/safety.py`'s `classify_module_exception` — never a raw traceback,
+    hostname, or library name, which stay in the application log only."""
+
+    MODULE_TIMEOUT = "MODULE_TIMEOUT"
+    CONNECTION_REFUSED = "CONNECTION_REFUSED"
+    CONNECTION_RESET = "CONNECTION_RESET"
+    TLS_ERROR = "TLS_ERROR"
+    TOO_MANY_REDIRECTS = "TOO_MANY_REDIRECTS"
+    BLOCKED_REDIRECT_TARGET = "BLOCKED_REDIRECT_TARGET"
+    HTTP_ERROR = "HTTP_ERROR"
+    UNEXPECTED_ERROR = "UNEXPECTED_ERROR"
+
+
 class Grade(StrEnum):
     A_PLUS = "A+"
     A = "A"

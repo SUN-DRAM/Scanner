@@ -18,7 +18,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from app.enums import Severity
+from app.enums import ModuleStatus, Severity
 from app.grading import ModuleScoreInput, grade_scan
 from app.scanner import ScanContext
 from app.scanner.orchestrator import _modules_as_pairs, _run_all_modules
@@ -43,6 +43,8 @@ class ScanOutcome:
     findings: list[str] = field(default_factory=list)
     grade: str | None = None
     score: int | None = None
+    # v3.4: ModuleResult.error is a structured ModuleError now, not a bare
+    # string — stored here as "code: message" for the human-readable print.
     module_errors: dict[str, str] = field(default_factory=dict)
 
 
@@ -64,13 +66,18 @@ async def _scan_one(hostname: str, semaphore: asyncio.Semaphore) -> ScanOutcome:
             if result is not None
         ]
         grading = grade_scan(module_inputs)
-        outcome.grade = grading.overall_grade.value
+        # v3.0 (§9 Step 4b): overall_grade is None, not a lower one, when
+        # the certificate module itself didn't complete — a real outcome
+        # this harness must report, not crash on (pre-existing bug, found
+        # and fixed here while verifying docs/Fix headers and incomplete.md).
+        outcome.grade = grading.overall_grade.value if grading.overall_grade is not None else None
         outcome.score = grading.overall_score
         outcome.findings = [f.code for f in grading.findings]
 
         for name, result in _modules_as_pairs(modules):
             if result is not None and result.error is not None:
-                outcome.module_errors[name.value] = result.error
+                err = result.error
+                outcome.module_errors[name.value] = f"{err.code.value}: {err.message}"
 
         return outcome
 
@@ -221,10 +228,30 @@ async def run_edge_cases() -> tuple[int, int]:
 
         assert outcome.modules is not None
         _print_edge_case_detail(case, outcome.modules)
+
+        completion_failure = _edge_case_completion_failure(case, outcome.modules)
+        if completion_failure is not None:
+            print(f"    RESULT: FAIL — {completion_failure}")
+            failed += 1
+            continue
+
         print("    RESULT: PASS — completed without crashing")
         passed += 1
 
     return passed, failed
+
+
+def _edge_case_completion_failure(case: EdgeCase, modules: Modules) -> str | None:
+    """A few edge cases need a stronger assertion than "didn't crash" — a
+    specific module actually completing. Returns a failure reason, or None
+    when the case's stronger assertion (if it has one) passes."""
+    if case.label == "dead_port_80_headers_must_still_complete":
+        headers = modules.headers
+        if headers is None or headers.status == ModuleStatus.ERROR:
+            status = headers.status.value if headers else "missing"
+            error = headers.error if headers else None
+            return f"headers module did not complete (status={status}, error={error!r})"
+    return None
 
 
 def _print_edge_case_detail(case: EdgeCase, modules: Modules) -> None:

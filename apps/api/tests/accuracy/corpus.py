@@ -167,4 +167,14 @@ EDGE_CASES: tuple[EdgeCase, ...] = (
         "module returns clean nulls rather than a wrong or fabricated date on "
         "any WHOIS failure/redaction, per contract §7 rule 7",
     ),
+    EdgeCase(
+        "dead_port_80_headers_must_still_complete",
+        "letshego.com",
+        "docs/Fix headers and incomplete.md: port 80 silently black-holes every "
+        "TCP connect (no RST, no response at all) — the headers module's HTTP "
+        "redirect probe used to consume the entire module timeout getting "
+        "there, starving the otherwise-fast, working HTTPS probe and taking "
+        "the whole module down as status=error. `run.py` asserts the headers "
+        "module specifically completes here, not just 'didn't crash'.",
+    ),
 )

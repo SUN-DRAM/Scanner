@@ -211,7 +211,10 @@ def test_dropped_module_renormalises_correctly() -> None:
     assert global_score == 95
     assert result.overall_score == min(weighted, global_score) == 95
     assert result.overall_grade == Grade.A_PLUS  # 95 is still the A+ threshold
-    assert result.grade_cap_reason == "reduced by 1 medium-severity finding"
+    # docs/Fix headers and incomplete.md §5: both 97 and 95 band to A+, so
+    # the budget being lower than the weighted mean didn't cost a band —
+    # nothing to explain, saying so would only undercut a still-clean A+.
+    assert result.grade_cap_reason is None
     assert result.module_grades[ModuleName.DNS].score is None
     assert result.module_grades[ModuleName.DNS].grade is None
     assert result.is_complete is False
@@ -502,3 +505,50 @@ def test_grade_cap_reason_excludes_domain_expiry_codes_from_the_reduction_too() 
         _finding(Severity.HIGH, ModuleName.DNS, "DOMAIN_EXPIRING_SOON"),
     ]
     assert grade_cap_reason(76, 90, 76, findings) is None
+
+
+# --- docs/Fix headers and incomplete.md §5: suppress the reason when the
+# budget didn't actually cost the scan a band ---
+
+
+def test_grade_cap_reason_is_none_when_the_budget_and_the_mean_land_in_the_same_band() -> None:
+    # The exact sundram.tech case the doc names: weighted 99 and global 98
+    # both band to A+ — "reduced by 2 low-severity findings" would only
+    # undercut a report that's still, band-for-band, a clean A+.
+    findings = [
+        _finding(Severity.LOW, ModuleName.CERTIFICATE, "CERT_NO_OCSP_STAPLING"),
+        _finding(Severity.LOW, ModuleName.DNS, "DNS_NO_CAA"),
+    ]
+    assert grade_for_score(99) == grade_for_score(98) == Grade.A_PLUS
+    assert grade_cap_reason(98, 99, 98, findings) is None
+
+
+def test_grade_cap_reason_is_none_for_an_a_grade_that_would_have_been_a_anyway() -> None:
+    # "not for A where the raw weighted score was already in that band" —
+    # generalised: 92 and 90 both band to A (88-94), so nothing was cost.
+    findings = [_finding(Severity.LOW, ModuleName.HEADERS, "XFO_MISSING")]
+    assert grade_for_score(92) == grade_for_score(90) == Grade.A
+    assert grade_cap_reason(90, 92, 90, findings) is None
+
+
+def test_grade_cap_reason_still_fires_when_the_budget_pulls_an_a_down_to_a_b() -> None:
+    # Contrast case: the band genuinely changes (A -> B), so this one still
+    # needs explaining — the suppression is about the band, not the letter A.
+    findings = [_finding(Severity.HIGH, ModuleName.TLS, "TLS_LEGACY_PROTOCOL")]
+    assert grade_for_score(92) == Grade.A
+    assert grade_for_score(80) == Grade.B
+    assert grade_cap_reason(80, 92, 80, findings) == "reduced by 1 high-severity finding"
+
+
+def test_grade_scan_suppresses_the_reason_for_the_sundram_tech_style_report() -> None:
+    # End-to-end version of the same case via grade_scan, not just the
+    # isolated function — a low finding in each of two different modules,
+    # otherwise clean, must read as a plain A+ with no reason line at all.
+    low_cert = _finding(Severity.LOW, ModuleName.CERTIFICATE, "CERT_NO_OCSP_STAPLING")
+    low_dns = _finding(Severity.LOW, ModuleName.DNS, "DNS_NO_CAA")
+    inputs = _clean_inputs({ModuleName.CERTIFICATE: [low_cert], ModuleName.DNS: [low_dns]})
+
+    result = grade_scan(inputs)
+
+    assert result.overall_grade == Grade.A_PLUS
+    assert result.grade_cap_reason is None

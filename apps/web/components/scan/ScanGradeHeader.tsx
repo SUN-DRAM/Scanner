@@ -52,6 +52,13 @@ interface ScanGradeHeaderProps {
    * this component only ever displays it, never re-derives it from
    * `grade`/`score` itself. */
   gradeCapReason?: string | null;
+  /** docs/Fix headers and incomplete.md §4.2: `scan.is_complete` — `false`
+   * means at least one module didn't run, so `score` is biased upward by an
+   * unknown amount (its weight redistributed to the modules that did
+   * complete). Renders the score as a ceiling in that case. `undefined`/
+   * `null` (queued/running/failed, or a surface that never passes it) reads
+   * as complete — never show the caveat without a positive reason to. */
+  isComplete?: boolean | null;
   /** Heading tag for the headline sentence — `1` on the standalone public
    * share page, `2` inside the dashboard's "Latest result" section. The
    * grade dial, score and tone label render identically either way. */
@@ -74,6 +81,7 @@ export function ScanGradeHeader({
   score,
   headline,
   gradeCapReason,
+  isComplete,
   headingLevel = 2,
   className,
 }: ScanGradeHeaderProps) {
@@ -84,7 +92,7 @@ export function ScanGradeHeader({
     <div className={cn("flex flex-col items-center gap-3 text-center", className)}>
       {grade !== null && score !== null && tone !== null ? (
         <>
-          <GradeDial grade={grade} score={score} />
+          <GradeDial grade={grade} score={score} scoreIsCeiling={isComplete === false} />
           <p
             className={cn(
               "font-mono text-xs font-medium uppercase tracking-wide",

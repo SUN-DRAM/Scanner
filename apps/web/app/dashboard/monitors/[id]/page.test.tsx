@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
-import type { MonitoredHostname, Scan } from "@/types/contract";
+import type { DnsData, HeadersData, ModuleResult, MonitoredHostname, Scan } from "@/types/contract";
 
 // The monitor detail page pulls in the `MonitorActions` client component,
 // which calls `useRouter()` at render — stub `next/navigation` so a plain
@@ -171,5 +171,99 @@ describe("dashboard monitor detail page", () => {
     expect(html).toContain("82/100");
     expect(html).toContain("Grade C");
     expect(html).toContain("C — capped by 2 high-severity findings");
+  });
+
+  // --- docs/Fix headers and incomplete.md Step 4 ---
+
+  const ERRORED_HEADERS: ModuleResult<HeadersData> = {
+    module: "headers",
+    status: "error",
+    score: null,
+    grade: null,
+    label: "Security headers",
+    summary: "This check did not complete — try scanning again.",
+    checked_at: "2026-09-08T09:00:04Z",
+    duration_ms: 8010,
+    findings: [],
+    data: null,
+    error: {
+      code: "MODULE_TIMEOUT",
+      message: "The security headers check timed out after 8 seconds.",
+    },
+  };
+
+  // Contract §6.1: "modules always contains all seven keys, even when a
+  // module errored" — a real completed scan never has a null module entry,
+  // so the second-module test below uses a real (skipped) result rather
+  // than leaving `dns: null`, which would only exercise this test's own
+  // fallback path instead of the real one.
+  const SKIPPED_DNS: ModuleResult<DnsData> = {
+    module: "dns",
+    status: "skipped",
+    score: null,
+    grade: null,
+    label: "DNS",
+    summary: "This check did not complete — try scanning again.",
+    checked_at: "2026-09-08T09:00:04Z",
+    duration_ms: 12,
+    findings: [],
+    data: null,
+    error: null,
+  };
+
+  it("names the single incomplete module and appends its reason (§4.1)", async () => {
+    const { ScanResultView } = await import("@/components/scan/ScanResultView");
+    const partialScan: Scan = {
+      ...COMPLETED_SCAN,
+      is_complete: false,
+      incomplete_modules: ["headers"],
+      modules: { ...NULL_MODULES, headers: ERRORED_HEADERS },
+    };
+
+    const html = renderToStaticMarkup(<ScanResultView initialScan={partialScan} />);
+
+    expect(html).toContain("1 of 7 checks did not complete: Security headers.");
+    expect(html).toContain("should not be treated as a clean result — the check timed out.");
+  });
+
+  it("does not append a per-module reason when several checks are incomplete (§4.1)", async () => {
+    const { ScanResultView } = await import("@/components/scan/ScanResultView");
+    const partialScan: Scan = {
+      ...COMPLETED_SCAN,
+      is_complete: false,
+      incomplete_modules: ["headers", "dns"],
+      modules: { ...NULL_MODULES, headers: ERRORED_HEADERS, dns: SKIPPED_DNS },
+    };
+
+    const html = renderToStaticMarkup(<ScanResultView initialScan={partialScan} />);
+
+    expect(html).toContain("2 of 7 checks did not complete: Security headers and DNS.");
+    expect(html).not.toContain("— the check timed out");
+  });
+
+  it("shows the score as a ceiling, not a precise number, on a partial scan (§4.2)", async () => {
+    const { ScanResultView } = await import("@/components/scan/ScanResultView");
+    const partialScan: Scan = {
+      ...COMPLETED_SCAN,
+      is_complete: false,
+      incomplete_modules: ["headers"],
+      modules: { ...NULL_MODULES, headers: ERRORED_HEADERS },
+    };
+
+    const html = renderToStaticMarkup(<ScanResultView initialScan={partialScan} />);
+
+    // The grade letter is still shown plainly — only the number is caveated.
+    expect(html).toContain("Grade B");
+    expect(html).toContain("82 or lower");
+    expect(html).not.toContain("82/100");
+  });
+
+  it("shows the failed module's actual reason on its own card, not a dash (§4.3)", async () => {
+    const { ModuleCard } = await import("@/components/scan/ModuleCard");
+
+    const html = renderToStaticMarkup(<ModuleCard result={ERRORED_HEADERS} />);
+
+    expect(html).toContain("The security headers check timed out after 8 seconds.");
+    expect(html).not.toContain("This check did not complete — try scanning again.");
   });
 });

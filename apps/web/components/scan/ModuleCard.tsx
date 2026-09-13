@@ -32,8 +32,6 @@ export function ModuleCard({ result }: ModuleCardProps) {
     );
   }
 
-  const hasNoData = result.status === "error" || result.status === "skipped";
-
   return (
     <Card>
       <CardHeader>
@@ -47,13 +45,18 @@ export function ModuleCard({ result }: ModuleCardProps) {
         </div>
       </CardHeader>
       <CardContent>
-        <p className="text-sm leading-prose text-ink-muted">{result.summary}</p>
-
-        {hasNoData && result.error !== null ? (
+        {/* docs/Fix headers and incomplete.md §4.3: a failed module's
+            generic summary ("This check did not complete — try scanning
+            again.") told a reader nothing the "Could not complete" badge
+            above didn't already. Show the actual reason instead, when
+            there is one (same choice as the PDF's module table). */}
+        {result.error !== null ? (
           <p className="mt-3 rounded-control bg-line/30 px-3 py-2 font-mono text-xs text-ink-muted">
-            {result.error}
+            {result.error.message}
           </p>
-        ) : null}
+        ) : (
+          <p className="text-sm leading-prose text-ink-muted">{result.summary}</p>
+        )}
 
         {result.findings.length > 0 ? (
           <ul className="mt-4">
