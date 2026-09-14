@@ -10,6 +10,7 @@ import pytest
 from app.enums import ModuleStatus
 from app.scanner import ScanContext
 from app.scanner.certificate import run
+from tests.conftest import retry_flaky_scan
 
 
 def _ctx(hostname: str, port: int = 443) -> ScanContext:
@@ -29,7 +30,7 @@ async def test_google_com_is_a_healthy_certificate(require_internet: None) -> No
 
 @pytest.mark.asyncio
 async def test_expired_badssl_reports_cert_expired(require_internet: None) -> None:
-    result = await run(_ctx("expired.badssl.com"))
+    result = await retry_flaky_scan(lambda: run(_ctx("expired.badssl.com")))
     assert result.status == ModuleStatus.FAIL
     assert result.data is not None
     assert result.data.is_expired is True
@@ -39,7 +40,7 @@ async def test_expired_badssl_reports_cert_expired(require_internet: None) -> No
 
 @pytest.mark.asyncio
 async def test_self_signed_badssl_reports_self_signed(require_internet: None) -> None:
-    result = await run(_ctx("self-signed.badssl.com"))
+    result = await retry_flaky_scan(lambda: run(_ctx("self-signed.badssl.com")))
     assert result.status == ModuleStatus.FAIL
     assert result.data is not None
     assert result.data.is_self_signed is True
@@ -48,7 +49,7 @@ async def test_self_signed_badssl_reports_self_signed(require_internet: None) ->
 
 @pytest.mark.asyncio
 async def test_wrong_host_badssl_reports_hostname_mismatch(require_internet: None) -> None:
-    result = await run(_ctx("wrong.host.badssl.com"))
+    result = await retry_flaky_scan(lambda: run(_ctx("wrong.host.badssl.com")))
     assert result.status == ModuleStatus.FAIL
     assert result.data is not None
     assert result.data.hostname_matches is False
@@ -60,7 +61,7 @@ async def test_untrusted_root_badssl_leaf_is_otherwise_fine(require_internet: No
     # untrusted-root.badssl.com's leaf certificate is valid for its hostname —
     # the untrusted root is chain.py's concern (CHAIN_UNTRUSTED_ROOT), not
     # certificate.py's. This module should not flag it as expired/mismatched.
-    result = await run(_ctx("untrusted-root.badssl.com"))
+    result = await retry_flaky_scan(lambda: run(_ctx("untrusted-root.badssl.com")))
     assert result.data is not None
     assert result.data.is_expired is False
     assert result.data.hostname_matches is True

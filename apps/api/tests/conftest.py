@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import socket
-from collections.abc import AsyncGenerator
-from typing import Any
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from typing import Any, TypeVar
 
 import pytest
 import pytest_asyncio
@@ -12,7 +13,35 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import get_settings
+from app.enums import ModuleStatus
 from app.models import Base
+
+_ResultT = TypeVar("_ResultT")
+
+
+async def retry_flaky_scan(
+    scan: Callable[[], Awaitable[_ResultT]], *, retries: int = 1, delay: float = 3.0
+) -> _ResultT:
+    """docs/next step measures.md's "note on the flaky tests": badssl.com is
+    a free, unSLA'd shared demo server (see `pytest_collection_modifyitems`
+    below, docs/ACCURACY_REPORT.md) that occasionally times out under
+    ordinary load, unrelated to our own code — every occurrence
+    investigated so far reproduced cleanly on an isolated re-run. One retry
+    after a short backoff distinguishes that from a real regression,
+    instead of leaving a test permanently red for a known, external,
+    non-representative flake ("a test that always fails teaches people to
+    ignore failures"). `scan` must be a zero-arg callable returning a fresh
+    coroutine each call — a `ModuleResult` coroutine can't be awaited
+    twice. Only retries on `status == ModuleStatus.ERROR`; a result that
+    came back at all, even a genuine FAIL, is not a network flake and is
+    returned immediately."""
+    result = await scan()
+    attempt = 0
+    while getattr(result, "status", None) == ModuleStatus.ERROR and attempt < retries:
+        await asyncio.sleep(delay)
+        result = await scan()
+        attempt += 1
+    return result
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

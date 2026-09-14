@@ -6,6 +6,8 @@ touch the database — persistence needs a live Postgres, exercised via
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
@@ -106,7 +108,30 @@ async def test_self_scan_of_sundram_tech_completes_with_no_module_in_error(
     `app/safety.py` — §10 rule 8 deliberately exempts a hostname that merely
     *resolves to* our own IP, blocking only that IP submitted literally
     (see `OWN_PUBLIC_IPS`'s own docstring); confirmed directly against this
-    hostname, not assumed from reading the code."""
+    hostname, not assumed from reading the code.
+
+    docs/next step measures.md's "note on the flaky tests": confirmed
+    working directly from production (65.2.195.179 itself) on 2026-09-14 —
+    the only known-broken path is between *this* environment and that IP
+    specifically. Rather than leave this permanently red here, a short
+    reachability pre-check skips with an explicit reason when that known
+    path issue is present, so the test re-activates on its own wherever
+    the path is fine, instead of a hardcoded skip that would silently stop
+    meaning anything."""
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection("sundram.tech", 443), timeout=5.0
+        )
+        writer.close()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(writer.wait_closed(), timeout=2.0)
+    except Exception as exc:
+        pytest.skip(
+            f"sundram.tech:443 unreachable from this environment ({type(exc).__name__}: {exc}) "
+            "— known network path issue between this environment and 65.2.195.179, confirmed "
+            "reachable from production directly. Not a scanner bug (docs/next step measures.md)."
+        )
+
     modules, grading = await _full_scan("sundram.tech")
     errored = [name for name, result in _modules_as_pairs(modules) if result.status == "error"]
     assert errored == [], f"modules reported error: {errored}"
