@@ -26,11 +26,13 @@ from app.monitors import record_scan_failure, update_monitor_after_scan
 from app.safety import HostnameResolutionError, resolve_and_validate
 from app.scan_compat import stamp_schema_version
 from app.scanner import (
+    HandshakeTask,
     ScanContext,
     certificate,
     chain,
     dns_records,
     email_auth,
+    fetch_handshake,
     headers,
     readiness,
     tls,
@@ -66,32 +68,47 @@ def share_url(record: ScanRecord) -> str:
 
 
 async def _run_certificate_then_readiness(
-    ctx: ScanContext,
+    ctx: ScanContext, handshake_task: HandshakeTask
 ) -> tuple[ModuleResult[CertificateData], ModuleResult[ReadinessData]]:
     # Readiness synthesizes what certificate.py already found rather than
     # re-probing independently — see readiness.py's module docstring. Every
     # other module is genuinely independent and runs alongside these two.
-    cert_result = await certificate.run(ctx)
+    cert_result = await certificate.run(ctx, handshake_task)
     readiness_result = await readiness.run(ctx, cert_result)
     return cert_result, readiness_result
 
 
 async def _run_all_modules(ctx: ScanContext) -> Modules:
-    (
-        (cert_result, readiness_result),
-        chain_result,
-        tls_result,
-        dns_result,
-        email_result,
-        headers_result,
-    ) = await asyncio.gather(
-        _run_certificate_then_readiness(ctx),
-        chain.run(ctx),
-        tls.run(ctx),
-        dns_records.run(ctx),
-        email_auth.run(ctx),
-        headers.run(ctx),
-    )
+    # docs/fix_connection_footprint.md Step 2.1: certificate and chain both
+    # need the exact same pinned TLS handshake for this host — started once
+    # here and handed to both, instead of each opening its own separate
+    # connection for the same data. Started before the gather below so it's
+    # already in flight for whichever of the two reaches it first.
+    handshake_task: HandshakeTask = asyncio.ensure_future(fetch_handshake(ctx))
+    try:
+        (
+            (cert_result, readiness_result),
+            chain_result,
+            tls_result,
+            dns_result,
+            email_result,
+            headers_result,
+        ) = await asyncio.gather(
+            _run_certificate_then_readiness(ctx, handshake_task),
+            chain.run(ctx, handshake_task),
+            tls.run(ctx),
+            dns_records.run(ctx),
+            email_auth.run(ctx),
+            headers.run(ctx),
+        )
+    finally:
+        # Both awaiters normally consume the task; this only matters if
+        # both certificate and chain hit their own timeout before the
+        # shared fetch ever finished, which would otherwise leave it
+        # running unobserved in the background for the rest of its own
+        # PER_MODULE_TIMEOUT_SECONDS budget.
+        if not handshake_task.done():
+            handshake_task.cancel()
     return Modules(
         certificate=cert_result,
         chain=chain_result,

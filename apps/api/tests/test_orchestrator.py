@@ -12,12 +12,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.enums import Grade, ModuleName, ModuleStatus
+from app.enums import Grade, ModuleErrorCode, ModuleName, ModuleStatus
 from app.grading import ModuleScoreInput, grade_scan
 from app.safety import HostnameResolutionError, resolve_and_validate
 from app.scanner import ScanContext
 from app.scanner.orchestrator import _modules_as_pairs, _run_all_modules
-from app.schemas import ModuleResult
+from app.schemas import ModuleError, ModuleResult
 
 ACCEPTANCE_HOSTS = (
     "google.com",
@@ -115,6 +115,36 @@ async def test_self_scan_of_sundram_tech_completes_with_no_module_in_error(
 
 
 @pytest.mark.asyncio
+async def test_certificate_and_chain_share_one_handshake(require_internet: None) -> None:
+    """docs/fix_connection_footprint.md Step 2.1: certificate and chain used
+    to each open their own separate handshake for the same host — two
+    connections for data that arrives together in one response. Asserts
+    the real fetch (`open_pinned_tls_handshake`, wrapped not replaced, so
+    this still exercises the real network path) is called exactly once for
+    the pair, not twice, while both modules still produce correct,
+    independent results."""
+    from app import safety
+
+    call_count = 0
+    original = safety.open_pinned_tls_handshake
+
+    async def _counting_wrapper(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return await original(*args, **kwargs)
+
+    with patch("app.scanner.open_pinned_tls_handshake", new=_counting_wrapper):
+        modules, _grading = await _full_scan("google.com")
+
+    assert call_count == 1, f"expected one shared handshake fetch, got {call_count}"
+    assert modules.certificate is not None
+    assert modules.certificate.data is not None
+    assert modules.chain is not None
+    assert modules.chain.data is not None
+    assert modules.chain.data.chain_length >= 2
+
+
+@pytest.mark.asyncio
 async def test_certificate_module_error_nulls_the_overall_grade_end_to_end(
     require_internet: None,
 ) -> None:
@@ -134,7 +164,7 @@ async def test_certificate_module_error_nulls_the_overall_grade_end_to_end(
         duration_ms=10,
         findings=[],
         data=None,
-        error="simulated failure",
+        error=ModuleError(code=ModuleErrorCode.UNEXPECTED_ERROR, message="simulated failure"),
     )
 
     with patch(

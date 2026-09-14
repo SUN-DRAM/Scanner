@@ -309,6 +309,21 @@ RENEGOTIATION_PROBE_TIMEOUT_SECONDS = 2.0
 # module reports, so it must never be starved by this one's failure mode.
 HTTP_REDIRECT_PROBE_TIMEOUT_SECONDS = 3.0
 
+# chain.py's trust-store validation connection (_validates_against_trust_
+# store): capped separately from PER_MODULE_TIMEOUT_SECONDS because
+# writer.close() + writer.wait_closed() can hang indefinitely on a peer
+# that never sends a TLS close_notify / TCP FIN back — a known asyncio SSL
+# transport gotcha, not a scanner bug on our end. Confirmed directly
+# (docs/fix_connection_footprint.md Step 1): honda.com's chain module timed
+# out at exactly PER_MODULE_TIMEOUT_SECONDS whether run concurrently with
+# every other module or completely alone — the connection itself succeeds
+# (its own connect() call returns immediately), it's specifically the
+# close handshake that never completes, consuming the module's *entire*
+# remaining budget with nothing else running. Without its own short cap,
+# this one cleanup step can starve the rest of a scan that would otherwise
+# complete in under a second.
+CONNECTION_CLOSE_TIMEOUT_SECONDS = 2.0
+
 
 async def open_pinned_connection(
     ip: str,
@@ -458,6 +473,19 @@ def _do_pinned_tls_handshake(
                     _pump(sock, conn.do_handshake, reneg_deadline)
                     supports_renegotiation = True
 
+        # docs/fix_connection_footprint.md Step 1 (audited class-wide): this
+        # teardown is NOT the same bug as chain.py's original one, and
+        # deliberately isn't wrapped in CONNECTION_CLOSE_TIMEOUT_SECONDS —
+        # `sock` is non-blocking (setblocking(False) above), so any pyOpenSSL
+        # operation that would otherwise block (including shutdown()) raises
+        # WantReadError/WantWriteError immediately instead, which the
+        # suppress() below catches at once. There is no read-and-wait-for-
+        # the-peer's-close_notify step here the way asyncio's own
+        # StreamWriter.wait_closed() (chain.py) or anyio's TLSStream.aclose()
+        # (safe_get) both have. This whole function also already runs inside
+        # open_pinned_tls_handshake's asyncio.wait_for(timeout=timeout+1.0),
+        # so even a theoretical hang here — verified not to be possible —
+        # would already be bounded.
         with contextlib.suppress(Exception):
             conn.shutdown()
         conn.close()
@@ -625,18 +653,38 @@ async def safe_get(
         # on it (headers here; certificate/chain validity are
         # certificate.py's and chain.py's job), not to gate content
         # retrieval on trust.
+        # docs/fix_connection_footprint.md Step 1 (audited class-wide): not
+        # `async with httpx.AsyncClient(...)` — its __aexit__ calls
+        # client.aclose(), which for a TLS connection is anyio's
+        # TLSStream.aclose() -> unwrap(), the TLS close handshake (send our
+        # close_notify, *read* the peer's back). httpx's own `timeout=`
+        # covers connect/read/write/pool, never close, and unwrap() has no
+        # bound of its own — confirmed directly against the installed anyio
+        # (streams/tls.py), not assumed. A peer that never sends its
+        # close_notify back leaves this hanging exactly like chain.py's
+        # original bug, just through httpx/anyio's stack instead of
+        # asyncio's native one. Managed manually so both closes get their
+        # own short, independent cap instead of relying on the implicit,
+        # unbounded one `async with` would perform on exit.
         transport = PinnedHostTransport(pinned_ip=target.ip, verify=False)
-        async with httpx.AsyncClient(
+        client = httpx.AsyncClient(
             transport=transport,
             timeout=timeout,
             follow_redirects=False,
             headers={"user-agent": SCANNER_USER_AGENT},
-        ) as client:
+        )
+        try:
             response = await client.get(url)
             try:
                 body = await read_capped_body(response)
             finally:
-                await response.aclose()
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        response.aclose(), timeout=CONNECTION_CLOSE_TIMEOUT_SECONDS
+                    )
+        finally:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(client.aclose(), timeout=CONNECTION_CLOSE_TIMEOUT_SECONDS)
 
         location = response.headers.get("location") if response.is_redirect else None
         if location:

@@ -8,6 +8,7 @@ a trust store.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import ssl
 from collections.abc import Sequence
@@ -19,8 +20,8 @@ from cryptography.x509.oid import NameOID
 from app.enums import ModuleName
 from app.findings import build_finding
 from app.grading import module_summary
-from app.safety import open_pinned_connection, open_pinned_tls_handshake, resolve_and_validate
-from app.scanner import ScanContext, run_module
+from app.safety import CONNECTION_CLOSE_TIMEOUT_SECONDS, open_pinned_connection
+from app.scanner import HandshakeTask, ScanContext, fetch_handshake, run_module
 from app.schemas import ChainCertificate, ChainData, Finding, ModuleResult
 
 LABEL = "Chain"
@@ -51,14 +52,30 @@ async def _validates_against_trust_store(ip: str, port: int, hostname: str) -> b
     except ssl.SSLCertVerificationError:
         return False
     writer.close()
+    # docs/fix_connection_footprint.md Step 1: confirmed directly, not
+    # guessed — a peer that never sends a close_notify/FIN back leaves
+    # wait_closed() hanging indefinitely, silently consuming the rest of
+    # this module's PER_MODULE_TIMEOUT_SECONDS budget with nothing else
+    # running. This is the one place that can happen, so it gets its own
+    # short, independent cap.
     with contextlib.suppress(Exception):
-        await writer.wait_closed()
+        await asyncio.wait_for(writer.wait_closed(), timeout=CONNECTION_CLOSE_TIMEOUT_SECONDS)
     return True
 
 
-async def _detect(ctx: ScanContext) -> tuple[ChainData, list[Finding], str]:
-    target = await resolve_and_validate(ctx.hostname)
-    handshake = await open_pinned_tls_handshake(target.ip, ctx.port, ctx.hostname)
+async def _detect(
+    ctx: ScanContext, handshake_task: HandshakeTask | None = None
+) -> tuple[ChainData, list[Finding], str]:
+    # docs/fix_connection_footprint.md Step 2.1: certificate.py fetches this
+    # exact same handshake independently — two connections for data that
+    # arrives together in one. orchestrator.py starts one shared fetch and
+    # passes it to both; `handshake_task is None` (direct/standalone calls,
+    # e.g. every test in this file) falls back to fetching it here, same as
+    # before this change.
+    if handshake_task is None:
+        target, handshake = await fetch_handshake(ctx)
+    else:
+        target, handshake = await handshake_task
     chain = handshake.chain
     trusted = await _validates_against_trust_store(target.ip, ctx.port, ctx.hostname)
 
@@ -130,5 +147,10 @@ async def _detect(ctx: ScanContext) -> tuple[ChainData, list[Finding], str]:
     return data, findings, summary
 
 
-async def run(ctx: ScanContext) -> ModuleResult[ChainData]:
-    return await run_module(module=ModuleName.CHAIN, label=LABEL, ctx=ctx, detect=_detect)
+async def run(
+    ctx: ScanContext, handshake_task: HandshakeTask | None = None
+) -> ModuleResult[ChainData]:
+    async def _bound_detect(context: ScanContext) -> tuple[ChainData, list[Finding], str]:
+        return await _detect(context, handshake_task)
+
+    return await run_module(module=ModuleName.CHAIN, label=LABEL, ctx=ctx, detect=_bound_detect)

@@ -16,8 +16,7 @@ from cryptography.x509.oid import NameOID
 
 from app.enums import ModuleName, Severity
 from app.findings import build_finding
-from app.safety import open_pinned_tls_handshake, resolve_and_validate
-from app.scanner import ScanContext, run_module
+from app.scanner import HandshakeTask, ScanContext, fetch_handshake, run_module
 from app.schemas import CertificateData, Finding, ModuleResult
 
 LABEL = "Certificate"
@@ -127,9 +126,18 @@ def _chain_weak_signature_findings(
     return findings
 
 
-async def _detect(ctx: ScanContext) -> tuple[CertificateData, list[Finding], str]:
-    target = await resolve_and_validate(ctx.hostname)
-    handshake = await open_pinned_tls_handshake(target.ip, ctx.port, ctx.hostname)
+async def _detect(
+    ctx: ScanContext, handshake_task: HandshakeTask | None = None
+) -> tuple[CertificateData, list[Finding], str]:
+    # docs/fix_connection_footprint.md Step 2.1: chain.py needs this exact
+    # same handshake for the same host — orchestrator.py starts one shared
+    # fetch and passes it to both, halving this pair's connection count.
+    # `handshake_task is None` (direct/standalone calls, e.g. every test in
+    # this file) falls back to fetching it here, same as before this change.
+    if handshake_task is None:
+        _target, handshake = await fetch_handshake(ctx)
+    else:
+        _target, handshake = await handshake_task
     leaf = handshake.chain[0]
 
     common_name = _common_name(leaf.subject)
@@ -235,5 +243,12 @@ async def _detect(ctx: ScanContext) -> tuple[CertificateData, list[Finding], str
     return data, findings, summary
 
 
-async def run(ctx: ScanContext) -> ModuleResult[CertificateData]:
-    return await run_module(module=ModuleName.CERTIFICATE, label=LABEL, ctx=ctx, detect=_detect)
+async def run(
+    ctx: ScanContext, handshake_task: HandshakeTask | None = None
+) -> ModuleResult[CertificateData]:
+    async def _bound_detect(context: ScanContext) -> tuple[CertificateData, list[Finding], str]:
+        return await _detect(context, handshake_task)
+
+    return await run_module(
+        module=ModuleName.CERTIFICATE, label=LABEL, ctx=ctx, detect=_bound_detect
+    )

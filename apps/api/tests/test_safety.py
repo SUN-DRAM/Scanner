@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import ipaddress
 import ssl
+import time
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -13,6 +16,7 @@ from OpenSSL import SSL as openssl_ssl
 from app.enums import ModuleErrorCode
 from app.errors import ApiException, ErrorCode
 from app.safety import (
+    CONNECTION_CLOSE_TIMEOUT_SECONDS,
     HTTP_REDIRECT_PROBE_TIMEOUT_SECONDS,
     PER_MODULE_TIMEOUT_SECONDS,
     RENEGOTIATION_PROBE_TIMEOUT_SECONDS,
@@ -260,6 +264,29 @@ async def test_safe_get_degrades_gracefully_on_a_redirect_to_a_disallowed_port(
     assert result.final_url == "https://tls-v1-0.badssl.com:443/"
     assert result.status_code == 301
     assert result.headers.get("location") == "https://tls-v1-0.badssl.com:1010/"
+
+
+@pytest.mark.asyncio
+async def test_safe_get_bounds_a_hanging_client_close(require_internet: None) -> None:
+    """docs/fix_connection_footprint.md Step 1 (audited class-wide): anyio's
+    TLSStream.aclose() — what httpx.AsyncClient.aclose() calls for a TLS
+    connection — performs the TLS close handshake (unwrap()), which reads
+    for the peer's close_notify with no bound of its own; httpx's own
+    `timeout=` covers connect/read/write/pool, never close. Confirmed by
+    actually making the close hang and asserting safe_get still returns
+    promptly, not by reading the code — this is the same bug shape
+    chain.py's original one was, just through httpx/anyio's stack."""
+
+    async def _hang(self: httpx.AsyncClient) -> None:
+        await asyncio.Event().wait()
+
+    started = time.monotonic()
+    with patch.object(httpx.AsyncClient, "aclose", new=_hang):
+        result = await safe_get("https", "google.com", 443, "/")
+    elapsed = time.monotonic() - started
+
+    assert result.status_code < 500
+    assert elapsed < CONNECTION_CLOSE_TIMEOUT_SECONDS + 5
 
 
 # --- docs/Fix headers and incomplete.md Step 3: classify_module_exception ---

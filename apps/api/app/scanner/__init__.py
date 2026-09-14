@@ -17,7 +17,14 @@ from pydantic import BaseModel
 
 from app.enums import ModuleErrorCode, ModuleName, ModuleStatus
 from app.grading import grade_module, score_module, status_for_findings
-from app.safety import PER_MODULE_TIMEOUT_SECONDS, classify_module_exception
+from app.safety import (
+    PER_MODULE_TIMEOUT_SECONDS,
+    PinnedTlsHandshakeResult,
+    ResolvedTarget,
+    classify_module_exception,
+    open_pinned_tls_handshake,
+    resolve_and_validate,
+)
 from app.schemas import Finding, ModuleError, ModuleResult
 
 logger = logging.getLogger("app.scanner")
@@ -56,6 +63,23 @@ class ScanContext:
 
 
 DetectFn = Callable[[ScanContext], Awaitable[tuple[DataT, list[Finding], str]]]
+
+# docs/fix_connection_footprint.md Step 2.1: certificate.py and chain.py
+# both need the exact same pinned TLS handshake for the same host — two
+# separate connections for data that arrives together in one response.
+# `HandshakeTask` is what orchestrator.py's `_run_all_modules` starts once
+# (`asyncio.ensure_future(fetch_handshake(ctx))`) and hands to both
+# `certificate.run`/`chain.run`; awaiting the same Task from two places
+# returns the same result (or re-raises the same exception) to each,
+# without re-running the fetch. One shared helper here rather than two
+# copies, matching this codebase's "no parallel path" convention.
+HandshakeTask = asyncio.Task[tuple[ResolvedTarget, PinnedTlsHandshakeResult]]
+
+
+async def fetch_handshake(ctx: ScanContext) -> tuple[ResolvedTarget, PinnedTlsHandshakeResult]:
+    target = await resolve_and_validate(ctx.hostname)
+    handshake = await open_pinned_tls_handshake(target.ip, ctx.port, ctx.hostname)
+    return target, handshake
 
 
 async def run_module(
