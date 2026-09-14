@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.alerts import (
     _cert_expiry_candidates,
     _domain_expiry_candidates,
+    _fetch_previous_completed_scan,
     _grade_regression_candidate,
     _new_critical_finding_candidates,
     compute_scheduled_for,
@@ -29,6 +30,7 @@ from app.models import (
     AlertRecipientRecord,
     MonitoredHostnameRecord,
     OrganisationRecord,
+    ScanRecord,
 )
 from app.plans import get_plan
 from app.schemas import (
@@ -558,3 +560,52 @@ async def test_delivery_failure_retries_then_marks_failed_after_three_attempts(
     assert delivered_again == 0
     events = await _alerts_for(db_session, monitor.monitor_id)
     assert events[0].send_attempts == 3
+
+
+# --- version-tolerant reads (docs/urgent_scan_corruption.md Finding 4) ---
+
+
+@pytest.mark.asyncio
+async def test_fetch_previous_completed_scan_reads_a_pre_v3_row_without_raising(
+    db_session: AsyncSession,
+) -> None:
+    """This is the exact call site that crashed in production: a completed
+    scan row stored before `is_complete`/`incomplete_modules`/
+    `grade_cap_reason` existed raised a `ValidationError` here, and because
+    the caller (`orchestrator.py`'s `_run_and_persist`) had already
+    committed the *new* scan as `completed`, the crash's fallback overwrote
+    that already-successful result back to `failed`. It must not raise."""
+    org = await _make_org(db_session)
+    monitor = await _make_monitor(db_session, org)
+
+    old_scan = _scan(hostname=monitor.hostname, grade=Grade.B, domain_days=30)
+    old_payload = old_scan.model_dump(mode="json")
+    old_payload.pop("is_complete")
+    old_payload.pop("incomplete_modules")
+    old_payload.pop("grade_cap_reason")
+
+    old_record = ScanRecord(
+        scan_id=uuid.UUID(old_scan.scan_id),
+        public_slug=old_scan.public_slug,
+        hostname=monitor.hostname,
+        port=443,
+        status=ScanStatus.COMPLETED.value,
+        overall_grade=old_scan.overall_grade,
+        overall_score=old_scan.overall_score,
+        result=old_payload,
+        completed_at=old_scan.completed_at,
+        monitor_id=monitor.monitor_id,
+    )
+    db_session.add(old_record)
+    await db_session.commit()
+
+    newer_scan_id = uuid.uuid4()
+    previous = await _fetch_previous_completed_scan(db_session, monitor.monitor_id, newer_scan_id)
+
+    assert previous is not None
+    assert previous.is_complete is True
+    assert previous.incomplete_modules == []
+    assert previous.grade_cap_reason is None
+    assert previous.modules.dns is not None
+    assert previous.modules.dns.data is not None
+    assert previous.modules.dns.data.days_until_domain_expiry == 30

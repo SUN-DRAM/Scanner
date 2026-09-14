@@ -24,6 +24,7 @@ from app.grading import ModuleScoreInput, grade_scan
 from app.models import MonitoredHostnameRecord, OrganisationRecord, ScanRecord
 from app.monitors import record_scan_failure, update_monitor_after_scan
 from app.safety import HostnameResolutionError, resolve_and_validate
+from app.scan_compat import stamp_schema_version
 from app.scanner import (
     ScanContext,
     certificate,
@@ -159,7 +160,7 @@ async def _mark_failed(
     record.error_message = message
     record.completed_at = completed_at
     record.duration_ms = duration_ms
-    record.result = scan.model_dump(mode="json")
+    record.result = stamp_schema_version(scan.model_dump(mode="json"))
     await increment_daily_stat(session, "scans_failed", when=completed_at)
     await session.commit()
 
@@ -276,19 +277,21 @@ async def _run_and_persist(
     )
     record.overall_score = grading_result.overall_score
     record.headline = grading_result.headline
-    record.result = scan.model_dump(mode="json")
+    record.result = stamp_schema_version(scan.model_dump(mode="json"))
     record.completed_at = completed_at
     record.duration_ms = duration_ms
     await increment_daily_stat(session, "scans_completed", when=completed_at)
     await session.commit()
 
-    # Phase 2 Step 3: a scan enqueued on a MonitoredHostname's behalf
-    # (record.monitor_id set — app/monitors.py's create_manual_rescan or
-    # app/scheduler.py) updates that monitor's denormalised last_grade/
-    # last_score/last_scanned_at here, the one place a scan result is ever
-    # persisted as completed. Never on a failed scan (see the early-return
-    # branches above) — a transient failure must not overwrite the
-    # monitor's last known-good grade with nothing.
+    # docs/urgent_scan_corruption.md Finding 4 / Step 1.1: everything below
+    # this point is a *consequence* of a successful scan, not part of
+    # producing one — the scan is already committed as `completed` above.
+    # A failure here must never be able to undo that: each side effect is
+    # isolated in its own try/except that logs and moves on, so an
+    # exception here can never reach `run_scan`'s outer handler and trigger
+    # `_mark_failed` on a scan that already succeeded. `_mark_failed` must
+    # only ever be reachable from a failure in scanning itself (the
+    # early-return branches above, or an exception before the commit).
     if record.monitor_id is not None:
         cert_not_after = None
         if modules.certificate is not None and modules.certificate.data is not None:
@@ -297,20 +300,39 @@ async def _run_and_persist(
         # Step 5's alert engine compares against the monitor's *previous*
         # grade/certificate state, so it must run before update_monitor_
         # after_scan below overwrites both.
-        monitor = await session.get(MonitoredHostnameRecord, record.monitor_id)
-        if monitor is not None:
-            org = await session.get(OrganisationRecord, monitor.org_id)
-            if org is not None:
-                await evaluate_and_fire_alerts(session, org, monitor, scan)
+        try:
+            monitor = await session.get(MonitoredHostnameRecord, record.monitor_id)
+            if monitor is not None:
+                org = await session.get(OrganisationRecord, monitor.org_id)
+                if org is not None:
+                    await evaluate_and_fire_alerts(session, org, monitor, scan)
+        except Exception:
+            logger.exception(
+                "post_scan_alert_evaluation_failed",
+                extra={"scan_id": str(record.scan_id), "monitor_id": str(record.monitor_id)},
+            )
+            # An exception raised after a session.add() but before its
+            # commit (e.g. mid-way through firing an alert) can leave the
+            # session unusable for the queries below — never leave that to
+            # chance just because today's known failure mode (a Pydantic
+            # ValidationError before any DB write) happens not to need it.
+            await session.rollback()
 
-        await update_monitor_after_scan(
-            session,
-            record,
-            grade=grading_result.overall_grade,
-            score=grading_result.overall_score,
-            cert_not_after=cert_not_after,
-            scanned_at=completed_at,
-        )
+        try:
+            await update_monitor_after_scan(
+                session,
+                record,
+                grade=grading_result.overall_grade,
+                score=grading_result.overall_score,
+                cert_not_after=cert_not_after,
+                scanned_at=completed_at,
+            )
+        except Exception:
+            logger.exception(
+                "post_scan_monitor_update_failed",
+                extra={"scan_id": str(record.scan_id), "monitor_id": str(record.monitor_id)},
+            )
+            await session.rollback()
 
     return scan
 

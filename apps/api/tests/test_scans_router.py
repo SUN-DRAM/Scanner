@@ -458,3 +458,66 @@ async def test_get_scan_by_id_serialises_the_structured_module_error(
             assert leaked not in raw, f"{leaked!r} leaked into the API response"
     finally:
         await _cleanup(db_session, hostname)
+
+
+def _as_pre_v3_row(result: dict) -> dict:
+    """Simulates a `scans.result` row written before the v3.0/v3.1/v3.3/v3.4
+    contract amendments — no `schema_version`, none of `is_complete`,
+    `incomplete_modules`, `grade_cap_reason`, and a bare string for one
+    module's `error` instead of the structured `ModuleError` shape.
+    docs/urgent_scan_corruption.md Finding 4."""
+    row = dict(result)
+    row.pop("is_complete", None)
+    row.pop("incomplete_modules", None)
+    row.pop("grade_cap_reason", None)
+    row["modules"] = dict(row["modules"])
+    row["modules"]["headers"] = dict(row["modules"]["headers"])
+    row["modules"]["headers"]["error"] = "connection reset by peer"
+    return row
+
+
+@pytest.mark.asyncio
+async def test_get_scan_by_id_reads_a_pre_v3_stored_row_without_raising(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """docs/urgent_scan_corruption.md Finding 4, Step 1.2: a row stored
+    before `is_complete`/`incomplete_modules`/`grade_cap_reason` existed, and
+    before `ModuleResult.error` became structured, must still be servable —
+    it must never surface as a 500 (the shape a stray `ValidationError` would
+    take at this router), and the documented defaults must be exactly what
+    comes back."""
+    hostname = _test_hostname()
+    scan = make_completed_scan(hostname=hostname)
+    record = ScanRecord(
+        scan_id=uuid.UUID(scan.scan_id),
+        public_slug=scan.public_slug,
+        hostname=hostname,
+        port=443,
+        status=ScanStatus.COMPLETED.value,
+        overall_grade=scan.overall_grade,
+        overall_score=scan.overall_score,
+        headline=scan.headline,
+        result=_as_pre_v3_row(scan.model_dump(mode="json")),
+        completed_at=scan.completed_at,
+        client_ip_hash="deadbeef",
+    )
+    db_session.add(record)
+    await db_session.commit()
+    try:
+        response = await client.get(f"/api/v1/scans/{record.scan_id}")
+        assert response.status_code == 200
+        body = response.json()
+        # v3.0: a pre-partial-completion row was only ever stored on
+        # success, so `is_complete: true` is the documented default, not a
+        # guess.
+        assert body["is_complete"] is True
+        assert body["incomplete_modules"] == []
+        assert body["grade_cap_reason"] is None
+        # v3.4: the un-recoverable original exception type is tagged
+        # UNEXPECTED_ERROR; the message itself is preserved verbatim.
+        assert body["modules"]["headers"]["error"] == {
+            "code": "UNEXPECTED_ERROR",
+            "message": "connection reset by peer",
+        }
+    finally:
+        await _cleanup(db_session, hostname)

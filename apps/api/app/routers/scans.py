@@ -44,6 +44,7 @@ from app.safety import (
     resolve_and_validate,
     validate_port,
 )
+from app.scan_compat import parse_stored_scan
 from app.scanner.orchestrator import EMPTY_MODULES, share_url
 from app.schemas import Scan, ScanCreateRequest, ScanCreateResponse
 from app.stats import increment_daily_stat
@@ -131,7 +132,7 @@ def _scan_from_record(record: ScanRecord) -> Scan:
     # queued/running scan has no result yet, so contract §6.1's "modules may
     # be null" shape is built directly from what the row does have.
     if record.result is not None:
-        return Scan.model_validate(record.result)
+        return parse_stored_scan(record.result)
 
     return Scan(
         scan_id=str(record.scan_id),

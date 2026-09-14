@@ -36,6 +36,7 @@ from app.models import (
 )
 from app.notify.email import EmailSender, EmailSendError
 from app.plans import PlanDefinition, get_plan
+from app.scan_compat import parse_stored_scan
 from app.schemas import Scan
 
 logger = logging.getLogger("app.alerts")
@@ -234,7 +235,7 @@ async def _fetch_previous_completed_scan(
     record = (await session.execute(stmt)).scalar_one_or_none()
     if record is None or record.result is None:
         return None
-    return Scan.model_validate(record.result)
+    return parse_stored_scan(record.result)
 
 
 def _parse_hhmm(value: str) -> time:
