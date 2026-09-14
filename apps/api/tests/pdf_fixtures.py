@@ -363,6 +363,33 @@ def make_completed_scan(
     )
 
 
+def as_pre_v3_schema_row(
+    result: dict[str, Any],
+    *,
+    module_with_string_error: str | None = None,
+    error_message: str = "connection reset by peer",
+) -> dict[str, Any]:
+    """A `scans.result` row as it would have been written before v3.0
+    (`is_complete`/`incomplete_modules`), v3.1/v3.3 (`grade_cap_reason`),
+    and v3.4 (structured `ModuleResult.error`) all existed --
+    `app.scan_compat.parse_stored_scan` must turn this back into a `Scan`
+    without ever raising `ValidationError` (docs/urgent_scan_corruption.md
+    Finding 4). Pass `module_with_string_error` to also simulate the pre-v3.4
+    shape, where a failed module's `error` was a bare `str(exc)` rather than
+    a structured `{code, message}` object."""
+    row = dict(result)
+    row.pop("is_complete", None)
+    row.pop("incomplete_modules", None)
+    row.pop("grade_cap_reason", None)
+    if module_with_string_error is not None:
+        row["modules"] = dict(row["modules"])
+        row["modules"][module_with_string_error] = dict(
+            row["modules"][module_with_string_error]
+        )
+        row["modules"][module_with_string_error]["error"] = error_message
+    return row
+
+
 def make_many_findings(count: int) -> list[Finding]:
     """A synthetic finding set spanning many pages (Step 3: "40+ findings")."""
     severities = ["critical", "high", "medium", "low", "info"]

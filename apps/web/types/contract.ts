@@ -800,6 +800,11 @@ export interface AdminHealthReport {
   worker: AdminWorkerStatus;
   redis: "ok" | "error";
   postgres: "ok" | "error";
+  // v3.5 (docs/urgent_scan_corruption.md Step 4): count of scans in the
+  // last 24h with status "failed" but a non-null overall_grade -- only
+  // reachable by a scan completing successfully and then being overwritten
+  // as failed afterward (Finding 4). Should always be 0.
+  anomalous_failed_scans_24h: number;
 }
 
 // AlertEvent (§6.11) plus the resolved monitor hostname.

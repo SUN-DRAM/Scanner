@@ -12,26 +12,21 @@ from app.scan_compat import (
     parse_stored_scan,
     stamp_schema_version,
 )
-from tests.pdf_fixtures import default_modules, make_completed_scan
+from tests.pdf_fixtures import as_pre_v3_schema_row, default_modules, make_completed_scan
 
 
 def _pre_v3_payload() -> dict:
-    """A row as it would have been written before v3.0 (`is_complete`/
-    `incomplete_modules`), v3.1/v3.3 (`grade_cap_reason`), and v3.4
-    (structured `ModuleResult.error`) all existed — no `schema_version`
-    key, and one module's `error` is a bare string."""
     modules = default_modules()
     modules.tls.status = ModuleStatus.ERROR
     modules.tls.data = None
     modules.tls.score = None
     modules.tls.grade = None
     scan = make_completed_scan(modules=modules)
-    payload = scan.model_dump(mode="json")
-    payload.pop("is_complete")
-    payload.pop("incomplete_modules")
-    payload.pop("grade_cap_reason")
-    payload["modules"]["tls"]["error"] = "handshake failed: connection reset"
-    return payload
+    return as_pre_v3_schema_row(
+        scan.model_dump(mode="json"),
+        module_with_string_error="tls",
+        error_message="handshake failed: connection reset",
+    )
 
 
 def test_parse_stored_scan_defaults_is_complete_true_for_a_pre_v3_row() -> None:

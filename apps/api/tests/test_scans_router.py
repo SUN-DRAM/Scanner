@@ -26,7 +26,7 @@ from app.models import ScanRecord
 from app.redis_client import get_arq_pool, get_redis_client
 from app.schemas import ModuleError
 from tests.conftest import FakeArqPool
-from tests.pdf_fixtures import default_modules, make_completed_scan
+from tests.pdf_fixtures import as_pre_v3_schema_row, default_modules, make_completed_scan
 
 
 @pytest.fixture
@@ -460,22 +460,6 @@ async def test_get_scan_by_id_serialises_the_structured_module_error(
         await _cleanup(db_session, hostname)
 
 
-def _as_pre_v3_row(result: dict) -> dict:
-    """Simulates a `scans.result` row written before the v3.0/v3.1/v3.3/v3.4
-    contract amendments — no `schema_version`, none of `is_complete`,
-    `incomplete_modules`, `grade_cap_reason`, and a bare string for one
-    module's `error` instead of the structured `ModuleError` shape.
-    docs/urgent_scan_corruption.md Finding 4."""
-    row = dict(result)
-    row.pop("is_complete", None)
-    row.pop("incomplete_modules", None)
-    row.pop("grade_cap_reason", None)
-    row["modules"] = dict(row["modules"])
-    row["modules"]["headers"] = dict(row["modules"]["headers"])
-    row["modules"]["headers"]["error"] = "connection reset by peer"
-    return row
-
-
 @pytest.mark.asyncio
 async def test_get_scan_by_id_reads_a_pre_v3_stored_row_without_raising(
     client: AsyncClient, db_session: AsyncSession
@@ -497,7 +481,10 @@ async def test_get_scan_by_id_reads_a_pre_v3_stored_row_without_raising(
         overall_grade=scan.overall_grade,
         overall_score=scan.overall_score,
         headline=scan.headline,
-        result=_as_pre_v3_row(scan.model_dump(mode="json")),
+        result=as_pre_v3_schema_row(
+            scan.model_dump(mode="json"),
+            module_with_string_error="headers",
+        ),
         completed_at=scan.completed_at,
         client_ip_hash="deadbeef",
     )

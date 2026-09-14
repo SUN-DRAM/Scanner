@@ -859,6 +859,14 @@ class AdminHealthReport(ContractModel):
     worker: AdminWorkerStatus
     redis: Literal["ok", "error"]
     postgres: Literal["ok", "error"]
+    # v3.5 (docs/urgent_scan_corruption.md Step 4): count of scans in the
+    # last 24h with status "failed" but a non-null overall_grade — the exact
+    # shape only reachable by a scan completing successfully and then being
+    # overwritten afterward (Finding 4). Should always be 0; this is the
+    # live canary for that exact bug, or another with the same shape,
+    # recurring — nothing else on this page would have caught it, since the
+    # scan itself still reports a normal-looking grade everywhere else.
+    anomalous_failed_scans_24h: int
 
 
 class AdminAlertRow(AlertEvent):

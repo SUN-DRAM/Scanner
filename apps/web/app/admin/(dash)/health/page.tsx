@@ -55,6 +55,24 @@ function OverdueBanner({ report }: { report: AdminHealthReport }) {
   );
 }
 
+function AnomalousFailureBanner({ report }: { report: AdminHealthReport }) {
+  const n = report.anomalous_failed_scans_24h;
+  if (n === 0) return null;
+  return (
+    <div className="mb-8 rounded-card border border-alert bg-alert/10 px-4 py-3">
+      <p className="font-display text-lg leading-display text-alert">
+        {n} scan{n === 1 ? "" : "s"} completed, then overwritten as failed
+      </p>
+      <p className="mt-1 text-sm text-ink-muted">
+        A scan that succeeded is now showing status &quot;failed&quot; with its real
+        grade still attached — this is the exact shape of the scan-corruption
+        incident (docs/urgent_scan_corruption.md). Investigate before it fires more
+        false scan_failure alerts.
+      </p>
+    </div>
+  );
+}
+
 export default async function AdminHealthPage() {
   const token = await requireAdminToken();
   const report = await getAdminHealth(token).catch((err) => redirectIfForbidden(err));
@@ -71,6 +89,7 @@ export default async function AdminHealthPage() {
       </div>
 
       <OverdueBanner report={report} />
+      <AnomalousFailureBanner report={report} />
 
       <Panel title="Scheduler">
         <Stat
@@ -109,6 +128,11 @@ export default async function AdminHealthPage() {
           label="Stuck"
           value={report.scans_24h.stuck}
           tone={report.scans_24h.stuck > 0 ? "alert" : "ink"}
+        />
+        <Stat
+          label="Completed then failed"
+          value={report.anomalous_failed_scans_24h}
+          tone={report.anomalous_failed_scans_24h > 0 ? "alert" : "ink"}
         />
       </Panel>
 

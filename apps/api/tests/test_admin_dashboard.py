@@ -188,6 +188,33 @@ class _Seeder:
         self.scan_ids.append(record.scan_id)
         return record
 
+    async def corrupted_scan(
+        self,
+        monitor: MonitoredHostnameRecord,
+        *,
+        overall_grade: str | None = "A",
+        created_at: datetime | None = None,
+    ) -> ScanRecord:
+        """docs/urgent_scan_corruption.md Finding 4's exact shape: `status`
+        'failed' with a non-null `overall_grade` -- only reachable by a scan
+        completing successfully and then being overwritten afterward."""
+        record = ScanRecord(
+            scan_id=uuid.uuid4(),
+            public_slug=uuid.uuid4().hex[:12],
+            hostname=monitor.hostname,
+            port=monitor.port,
+            status="failed",
+            overall_grade=overall_grade,
+            overall_score=90,
+            monitor_id=monitor.monitor_id,
+            client_ip_hash=None,
+            created_at=created_at or datetime.now(UTC),
+        )
+        self.session.add(record)
+        await self.session.flush()
+        self.scan_ids.append(record.scan_id)
+        return record
+
     async def prospect_batch_scan(self, scan: ScanRecord) -> None:
         batch = ProspectBatchRecord(batch_id=uuid.uuid4(), label="test batch")
         self.session.add(batch)
@@ -530,6 +557,7 @@ async def test_health_report_shape(health_client: AsyncClient, admin_token: str)
         "last_successful_run_at",
     }
     assert body["worker"]["memory_mb"] is None
+    assert body["anomalous_failed_scans_24h"] == 0
 
 
 @pytest.mark.asyncio
@@ -545,6 +573,38 @@ async def test_health_report_flags_overdue_monitor(
     scheduler = response.json()["scheduler"]
     assert scheduler["monitors_overdue_1h"] >= 1
     assert scheduler["monitors_due"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_health_flags_a_scan_completed_then_overwritten_as_failed(
+    health_client: AsyncClient, admin_token: str, seed: _Seeder
+) -> None:
+    """docs/urgent_scan_corruption.md Finding 4 / Step 4: the live canary
+    for this exact bug (or another with the same shape) recurring."""
+    org = await seed.org()
+    await seed.owner(org)
+    monitor = await seed.monitor(org)
+    await seed.corrupted_scan(monitor)
+    await seed.commit()
+
+    response = await health_client.get("/api/v1/admin/health", headers=_auth(admin_token))
+    assert response.json()["anomalous_failed_scans_24h"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_health_ignores_an_honest_failed_scan(
+    health_client: AsyncClient, admin_token: str, seed: _Seeder
+) -> None:
+    """A genuinely failed scan (no grade, the only shape `_mark_failed`
+    actually produces) must never trip the anomaly count."""
+    org = await seed.org()
+    await seed.owner(org)
+    monitor = await seed.monitor(org)
+    await seed.corrupted_scan(monitor, overall_grade=None)
+    await seed.commit()
+
+    response = await health_client.get("/api/v1/admin/health", headers=_auth(admin_token))
+    assert response.json()["anomalous_failed_scans_24h"] == 0
 
 
 @pytest.mark.asyncio

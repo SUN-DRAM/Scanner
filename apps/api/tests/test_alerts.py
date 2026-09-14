@@ -42,6 +42,7 @@ from app.schemas import (
     Scan,
     SeverityCounts,
 )
+from tests.pdf_fixtures import as_pre_v3_schema_row
 
 
 def _certificate_module(
@@ -579,10 +580,7 @@ async def test_fetch_previous_completed_scan_reads_a_pre_v3_row_without_raising(
     monitor = await _make_monitor(db_session, org)
 
     old_scan = _scan(hostname=monitor.hostname, grade=Grade.B, domain_days=30)
-    old_payload = old_scan.model_dump(mode="json")
-    old_payload.pop("is_complete")
-    old_payload.pop("incomplete_modules")
-    old_payload.pop("grade_cap_reason")
+    old_payload = as_pre_v3_schema_row(old_scan.model_dump(mode="json"))
 
     old_record = ScanRecord(
         scan_id=uuid.UUID(old_scan.scan_id),

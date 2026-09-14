@@ -129,6 +129,28 @@ async def _scheduler_counts(session: AsyncSession, now: datetime) -> tuple[int, 
     return due, overdue, overdue_1h
 
 
+async def _anomalous_failed_scans_24h(session: AsyncSession, now: datetime) -> int:
+    """docs/urgent_scan_corruption.md Finding 4 / Step 4: a `failed` scan
+    never has a grade through any normal path -- `_mark_failed` never sets
+    `overall_grade`. The only way this combination occurs is a scan
+    completing successfully and then being overwritten as failed
+    afterward. Should always be 0; a live canary for that exact bug, or
+    another with the same shape, recurring."""
+    since = now - timedelta(hours=24)
+    value = (
+        await session.execute(
+            select(func.count())
+            .select_from(ScanRecord)
+            .where(
+                ScanRecord.status == ScanStatus.FAILED.value,
+                ScanRecord.overall_grade.is_not(None),
+                ScanRecord.created_at >= since,
+            )
+        )
+    ).scalar_one()
+    return int(value)
+
+
 async def _alert_counts(session: AsyncSession, now: datetime) -> tuple[int, int]:
     since = now - timedelta(hours=24)
     pending = (
@@ -159,12 +181,14 @@ async def build_health_report(session: AsyncSession, redis: Redis) -> AdminHealt
 
     postgres_status: Literal["ok", "error"] = "ok"
     last_run: datetime | None = None
+    anomalous_failed_scans_24h = 0
     try:
         await session.execute(text("SELECT 1"))
         scans_24h = await _scans_24h(session, now)
         due, overdue, overdue_1h = await _scheduler_counts(session, now)
         pending, failed_24h = await _alert_counts(session, now)
         last_run = await _last_scheduler_run(session)
+        anomalous_failed_scans_24h = await _anomalous_failed_scans_24h(session, now)
     except SQLAlchemyError:
         logger.exception("admin_health_db_metrics_failed")
         postgres_status = "error"
@@ -185,4 +209,5 @@ async def build_health_report(session: AsyncSession, redis: Redis) -> AdminHealt
         worker=AdminWorkerStatus(queue_depth=queue_depth, memory_mb=None),
         redis=redis_status,
         postgres=postgres_status,
+        anomalous_failed_scans_24h=anomalous_failed_scans_24h,
     )
