@@ -13,13 +13,14 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -523,4 +524,205 @@ class ProspectScanRecord(Base):
             "batch_id", "hostname", name="uq_prospect_scans_batch_hostname"
         ),
         Index("prospect_scans_batch_id_idx", "batch_id"),
+    )
+
+
+class OutreachCampaignRecord(Base):
+    """Contract §11/§7.15-16 (outreach orchestrator, Stage 1 v3.6, Stage 2
+    v3.10). Internal GTM tooling, same posture as ProspectBatchRecord
+    above: never customer-owned, no org_id, no user_id, never scheduled,
+    never alerted."""
+
+    __tablename__ = "outreach_campaigns"
+
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    # v3.10, Stage 2. Set by POST .../scan's `include_weak` query param
+    # (§7.16) and persisted here — the actual scanning happens on a
+    # decoupled periodic tick (app/outreach/scanner.py), not synchronously
+    # inside that request, so the choice has to survive past the one call
+    # that made it.
+    include_weak_prospects: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class OutreachProspectRecord(Base):
+    """Contract §11/§7.15, v3.6. One row per agency — rows in the Stage 1
+    CSV (§17) are grouped by contact_email into one of these at import.
+    `campaign_id` has no ON DELETE: a campaign with prospects must be
+    emptied explicitly before it can be deleted, never silently cascaded."""
+
+    __tablename__ = "outreach_prospects"
+
+    prospect_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("outreach_campaigns.campaign_id"), nullable=False
+    )
+    agency_name: Mapped[str] = mapped_column(Text, nullable=False)
+    agency_website: Mapped[str | None] = mapped_column(Text)
+    contact_name: Mapped[str | None] = mapped_column(Text)
+    contact_email: Mapped[str] = mapped_column(Text, nullable=False)
+    # §17.2 CSV enums (source: clutch|goodfirms|designrush|sortlist|manifest|
+    # linkedin|google|other; icp_grade: strong|potential|weak) — Python-level
+    # closed sets in app/outreach/, not promoted to contract §5: nothing
+    # outside the CSV importer reads either one yet.
+    source: Mapped[str | None] = mapped_column(String(32))
+    icp_grade: Mapped[str | None] = mapped_column(String(24))
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    state_reason: Mapped[str | None] = mapped_column(Text)
+    do_not_contact: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        # The import idempotency key (§17.4.4): re-importing the same file
+        # must find the same (campaign_id, contact_email) row rather than
+        # create a duplicate prospect.
+        UniqueConstraint(
+            "campaign_id", "contact_email", name="uq_outreach_prospects_campaign_email"
+        ),
+        Index("outreach_prospects_campaign_state_idx", "campaign_id", "state"),
+    )
+
+
+class OutreachDomainRecord(Base):
+    """Contract §11/§7.15, v3.6. One row per client domain (or the agency's
+    own site, relationship='own'). `scan_id` has no ON DELETE (default
+    RESTRICT), deliberately not SET NULL — see CONTRACT.md §11: a COMPLETED
+    domain must never end up pointing at a deleted scan, silently asserting
+    evidence that no longer exists. No code path deletes a `scans` row
+    today; if one is ever added it must handle referencing outreach_domains
+    rows explicitly rather than relying on this FK to make the row vanish."""
+
+    __tablename__ = "outreach_domains"
+
+    domain_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    prospect_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("outreach_prospects.prospect_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    hostname: Mapped[str] = mapped_column(String(253), nullable=False)
+    relationship_: Mapped[str] = mapped_column(
+        "relationship", String(16), nullable=False, server_default="client"
+    )
+    state: Mapped[str] = mapped_column(String(24), nullable=False)
+    scan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("scans.scan_id")
+    )
+    scan_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    scan_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        # The import/domain-processing idempotency key (§17.4.4).
+        UniqueConstraint("prospect_id", "hostname", name="uq_outreach_domains_prospect_hostname"),
+        Index("outreach_domains_prospect_state_idx", "prospect_id", "state"),
+    )
+
+
+class OutreachMessageRecord(Base):
+    """Contract §11/§7.15, v3.6-v3.7. One row per prospect (one email per
+    agency, never one per domain) — defined now, unused until Stage 4
+    (templates/PDF/Gmail draft creation) of docs/OUTREACH_BUILD_SPEC.md.
+    Do not read the empty table as having been missed.
+
+    No `outreach_findings` table (§4.2 of the spec): `hook_finding_code` is
+    a reference into the linked scan's own stored `scans.result`, read at
+    draft time through `parse_stored_scan()`, never copied — the same
+    anti-drift rule that JSONB column already establishes. Same for
+    `secondary_domain_ids`/`attachment_scan_ids`: soft references only (a
+    plain array column can't carry a real FK to each element), resolved
+    through the same read path."""
+
+    __tablename__ = "outreach_messages"
+
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    prospect_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("outreach_prospects.prospect_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    hook_code: Mapped[str] = mapped_column(String(48), nullable=False)
+    hook_domain_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("outreach_domains.domain_id"), nullable=False
+    )
+    hook_scan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("scans.scan_id"), nullable=False
+    )
+    hook_finding_code: Mapped[str | None] = mapped_column(String(64))
+    secondary_domain_ids: Mapped[list[uuid.UUID] | None] = mapped_column(
+        ARRAY(UUID(as_uuid=True))
+    )
+    template_variant: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    attachment_scan_ids: Mapped[list[uuid.UUID] | None] = mapped_column(
+        ARRAY(UUID(as_uuid=True))
+    )
+    gmail_draft_id: Mapped[str | None] = mapped_column(Text)
+    gmail_message_id: Mapped[str | None] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(String(24), nullable=False)
+    # v3.7, human sign-off: same purpose as OutreachProspectRecord.state_reason
+    # — why a transition failed. Distinct from reply_note below, which
+    # records what a human said back, not why the pipeline failed.
+    state_reason: Mapped[str | None] = mapped_column(Text)
+    # v3.7. One column every transition writes (app/outreach/state_machine.py),
+    # not a timestamp per state — answers "how long has this been sitting
+    # here" without a history table. drafted_at/sent_at/replied_at stay:
+    # they're what spec §12's reply-rate metrics measure.
+    state_changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    drafted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reply_note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        # The draft-creation idempotency key (§17.4.4/§10 of the spec): one
+        # message per prospect, ever.
+        UniqueConstraint("prospect_id", name="uq_outreach_messages_prospect_id"),
+    )
+
+
+class OutreachSuppressionRecord(Base):
+    """Contract §11/§7.15, v3.6. Permanent, standalone — deliberately no FK
+    to any other outreach table, so an opt-out survives a campaign or
+    prospect being deleted. Checked at import (§17.4.5) and before every
+    draft (spec §9.4); honoured immediately and never lapses (DPDP, spec
+    §14)."""
+
+    __tablename__ = "outreach_suppressions"
+
+    email: Mapped[str] = mapped_column(String(320), primary_key=True)
+    reason: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )

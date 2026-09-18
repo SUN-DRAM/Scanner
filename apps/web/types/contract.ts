@@ -74,6 +74,36 @@ export type DigestMode = "immediate" | "digest";
 // AdminAccountRow.
 export type AccountHealth = "activated" | "stalled" | "at_risk" | "dormant";
 
+// --- Outreach orchestrator additions (contract v3.6) ---
+// §7.15, internal admin surface only — never in a customer-facing response.
+
+// CONTRACT GAP, proposed and signed off in-session: not named by
+// docs/OUTREACH_BUILD_SPEC.md's own enum list, but outreach_campaigns.status
+// (§11) needs a closed set. "paused" must have real teeth in the state
+// machine (Step 4) — blocks new domain scans and new drafts for that
+// campaign, not a cosmetic label.
+export type OutreachCampaignStatus = "draft" | "running" | "paused" | "complete";
+
+// Spec §5.1. One row per agency (grouped by contact_email at import).
+export type OutreachProspectState =
+  | "pending"
+  | "scanning"
+  | "analyzing"
+  | "suppressed"
+  | "drafting"
+  | "ready_for_review"
+  | "sent"
+  | "replied"
+  | "failed"
+  | "skipped";
+
+// Spec §5.2. One row per client domain.
+export type OutreachDomainState =
+  "pending" | "running" | "completed" | "completed_partial" | "retrying" | "failed";
+
+// Spec §5.3. One row per prospect — unused until Stage 4.
+export type OutreachMessageState = "drafted" | "ready_for_review" | "sent" | "replied" | "discarded";
+
 // --- error envelope (contract §7.4) ---
 
 export type ErrorCode =
@@ -97,7 +127,9 @@ export type ErrorCode =
   | "NOT_FOUND"
   | "WEBHOOK_INVALID_SIGNATURE"
   // --- PDF report export (contract v2.9) ---
-  | "REPORT_NOT_AVAILABLE";
+  | "REPORT_NOT_AVAILABLE"
+  // --- Outreach orchestrator Stage 2 (contract v3.9) ---
+  | "INVALID_CAMPAIGN_STATUS";
 
 export interface ApiError {
   code: ErrorCode;
@@ -907,3 +939,104 @@ export interface AdminProspectBatchDetail extends AdminProspectBatchRow {
 // POST /api/v1/admin/prospects -> AdminProspectBatchDetail (202) | 422 VALIDATION_ERROR
 // GET /api/v1/admin/prospects/{batch_id} -> AdminProspectBatchDetail | 404 NOT_FOUND
 // GET /api/v1/admin/prospects/{batch_id}/export -> text/csv
+
+// --- §7.15 Outreach orchestrator, Stage 1 admin surface (v3.6) ---
+
+export interface OutreachCampaignCreateRequest {
+  name: string;
+}
+
+export interface OutreachCampaign {
+  campaign_id: string;
+  name: string;
+  status: OutreachCampaignStatus;
+  created_at: string;
+}
+
+export interface OutreachCampaignRow extends OutreachCampaign {
+  prospect_count: number;
+  // Every OutreachProspectState key is always present, 0 not omitted.
+  state_counts: Record<OutreachProspectState, number>;
+}
+
+export interface OutreachProspectRow {
+  prospect_id: string;
+  agency_name: string;
+  contact_name: string | null;
+  contact_email: string;
+  state: OutreachProspectState;
+  state_reason: string | null;
+  domain_count: number;
+  created_at: string;
+}
+
+export interface OutreachRejectedRow {
+  row_number: number;
+  reason: string;
+}
+
+export interface OutreachImportWarning {
+  contact_email: string;
+  message: string;
+}
+
+export interface OutreachImportReport {
+  imported_agencies: number;
+  imported_domains: number;
+  skipped_agencies: number;
+  suppressed_agencies: number;
+  rejected_rows: OutreachRejectedRow[];
+  warnings: OutreachImportWarning[];
+}
+
+// --- §7.16 Outreach orchestrator, Stage 2 admin surface (v3.9/v3.10) ---
+
+export interface OutreachRecentOutcome {
+  domain_id: string;
+  hostname: string;
+  prospect_id: string;
+  agency_name: string;
+  state: OutreachDomainState; // always one of completed|completed_partial|failed
+  scan_error: string | null;
+  settled_at: string;
+}
+
+export interface OutreachScanMetrics {
+  clean_rate: number | null;
+  completed_partial_count: number;
+  completed_partial_by_module_error: Record<string, number>;
+  failed_count: number;
+  failed_by_reason: Record<string, number>;
+  median_scan_duration_ms: number | null;
+  p95_scan_duration_ms: number | null;
+  retried_and_rescued_count: number;
+  total_wall_time_ms: number | null;
+}
+
+export interface OutreachScanProgress {
+  campaign_id: string;
+  campaign_status: OutreachCampaignStatus;
+  // Every OutreachDomainState key is always present, 0 not omitted.
+  domain_state_counts: Record<OutreachDomainState, number>;
+  in_flight: number;
+  started_at: string | null;
+  estimated_completion_at: string | null;
+  recent_outcomes: OutreachRecentOutcome[];
+  metrics: OutreachScanMetrics;
+}
+
+// POST /api/v1/admin/outreach/campaigns -> OutreachCampaign (201)
+// GET /api/v1/admin/outreach/campaigns?page=&per_page= -> PaginatedList<OutreachCampaignRow>
+// GET /api/v1/admin/outreach/campaigns/{campaign_id} -> OutreachCampaignRow | 404 NOT_FOUND
+// POST /api/v1/admin/outreach/campaigns/{campaign_id}/import (multipart, field "file")
+//   -> OutreachImportReport | 404 NOT_FOUND | 422 VALIDATION_ERROR
+// GET /api/v1/admin/outreach/campaigns/{campaign_id}/prospects?state=&page=&per_page=
+//   -> PaginatedList<OutreachProspectRow> | 404 NOT_FOUND
+// POST /api/v1/admin/outreach/campaigns/{campaign_id}/scan?include_weak= -> OutreachCampaignRow (202)
+//   | 404 NOT_FOUND | 409 INVALID_CAMPAIGN_STATUS
+// POST /api/v1/admin/outreach/campaigns/{campaign_id}/pause -> OutreachCampaignRow (200)
+//   | 404 NOT_FOUND | 409 INVALID_CAMPAIGN_STATUS
+// POST /api/v1/admin/outreach/campaigns/{campaign_id}/resume -> OutreachCampaignRow (202)
+//   | 404 NOT_FOUND | 409 INVALID_CAMPAIGN_STATUS
+// GET /api/v1/admin/outreach/campaigns/{campaign_id}/scan-progress -> OutreachScanProgress
+//   | 404 NOT_FOUND

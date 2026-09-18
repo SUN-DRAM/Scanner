@@ -10,6 +10,7 @@ import { cn } from "@/lib/format";
 const NAV_LINKS = [
   { href: "/admin/accounts", label: "Accounts" },
   { href: "/admin/prospects", label: "Prospects" },
+  { href: "/admin/outreach", label: "Outreach" },
   { href: "/admin/funnel", label: "Funnel" },
   { href: "/admin/health", label: "Health" },
 ] as const;

@@ -38,9 +38,12 @@ docker compose exec api mypy app
 docker compose exec api alembic upgrade head
 docker compose exec web pnpm lint
 docker compose exec web pnpm build
+docker compose build worker        # required after ANY worker-relevant code change — see below
 ```
 
 Health check: `http://localhost:8000/api/v1/health` must return `200` with database and redis both `ok`.
+
+**The `worker` container does not hot-reload.** `docker compose restart worker` (even `--force-recreate`) silently keeps running old code after you edit `app/worker.py`, `app/scheduler.py`, `app/outreach/scanner.py`, `app/scanner/orchestrator.py`, or anything else it imports. The image bakes a build-time copy of `app/` into site-packages; arq's own CLI appends the live bind-mounted source to the *end* of `sys.path` rather than the front, so the frozen copy wins over your edit every time. Run `docker compose build worker` after touching any worker-relevant file, then restart it — a plain restart is not enough. (`api`/`web` don't have this problem — their processes reload from the bind mount correctly.)
 
 ## Environment
 

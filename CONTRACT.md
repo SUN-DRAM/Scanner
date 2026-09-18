@@ -162,6 +162,11 @@ ADMIN_DIGEST_EMAIL=                 # Admin dashboard v2.8 (§7.13). Sole recipi
 RATE_LIMIT_PDF_PER_IP_PER_HOUR=10   # PDF export (§7.14, v2.9). Reuses the §10 Redis sliding-window limiter, its own key prefix — not folded into RATE_LIMIT_PER_IP_PER_HOUR, since a render is far more expensive than a scan-status read.
 PDF_CACHE_TTL_SECONDS=86400         # §7.14, v2.9. A completed scan's rendered PDF is cached in Redis (key: scan_id) for this long — the scan is immutable, so the bytes are too.
 PDF_MAX_CONCURRENT=2                # §7.14, v2.9. Caps concurrent WeasyPrint renders via an in-process semaphore, deliberately well under the scanner's own budget so the export path can never starve it.
+OUTREACH_MAX_IMPORT_ROWS=500        # §7.15/§11, v3.6 Stage 1. CSV import (§17) hard-rejects a file with more data rows than this, before any row is processed — "keep a mistake small," not a silent truncation. Stage 1 only; the outreach orchestrator's later stages (scanning, drafting, sending) bring their own env vars with them.
+OUTREACH_MAX_CONCURRENT_SCANS=2     # §7.16, v3.9 Stage 2. Redis-semaphore cap on concurrent outreach batch scans (app/outreach/scanner.py) — its own budget, separate from and smaller than SCHEDULER_MAX_CONCURRENT_SCANS (3) and the worker's max_jobs, so a running batch structurally cannot starve public or scheduled scans.
+OUTREACH_SCAN_DELAY_SECONDS=15      # §7.16, v3.9. Sequential pacing between outreach batch scans — the measured 98%-clean-scan-rate traffic profile (docs/next step measures.md), not a scanner limitation. There is no reason for a batch to be fast.
+OUTREACH_MAX_SCAN_RETRIES=2         # §7.16, v3.9. Retry attempts *after* the first for a domain scan failure — 1 + this many total attempts before a domain becomes FAILED. See §7.16's note on this being a decision, not a literal spec value.
+OUTREACH_RETRY_BACKOFF_SECONDS=300  # §7.16, v3.9. Delay before a COMPLETED_PARTIAL domain's one re-scan, and before a RETRYING domain's next attempt.
 
 # --- web ---
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
@@ -208,6 +213,12 @@ AccountHealth     = "activated" | "stalled" | "at_risk" | "dormant"   // §7.13,
 
 // --- v3.4 addition (docs/Fix headers and incomplete.md) ---
 ModuleErrorCode   = "MODULE_TIMEOUT" | "CONNECTION_REFUSED" | "CONNECTION_RESET" | "TLS_ERROR" | "TOO_MANY_REDIRECTS" | "BLOCKED_REDIRECT_TARGET" | "HTTP_ERROR" | "UNEXPECTED_ERROR"   // §6.2 ModuleResult.error.code. SCREAMING_SNAKE_CASE like ErrorCode (§7.4) and Finding.code (§8), not lower_snake_case like this table's other enums — a deliberate match to those two "error/finding identifier" families, not an inconsistency.
+
+// --- Outreach orchestrator additions (v3.6, docs/outreach_stage_1.md Step 1) — internal admin surface only, never in any customer-facing response ---
+OutreachCampaignStatus = "draft" | "running" | "paused" | "complete"   // Not named by docs/OUTREACH_BUILD_SPEC.md's enum list, but §4.1's `outreach_campaigns.status` column needs a closed set; proposed and signed off in-session, same pattern as `InvoiceState`/`DigestMode` (§14 v2.0/v2.4). `paused` must have real teeth in the state machine (Step 4) — it blocks new domain scans being enqueued and new drafts being created for that campaign, not merely a label; a cosmetic pause is worse than none, since it's reached for during an incident.
+OutreachProspectState  = "pending" | "scanning" | "analyzing" | "suppressed" | "drafting" | "ready_for_review" | "sent" | "replied" | "failed" | "skipped"   // §5.1 of the spec, one email per agency
+OutreachDomainState    = "pending" | "running" | "completed" | "completed_partial" | "retrying" | "failed"   // §5.2 of the spec, one row per client domain
+OutreachMessageState   = "drafted" | "ready_for_review" | "sent" | "replied" | "discarded"   // §5.3 of the spec, one row per prospect (unique on prospect_id, §11)
 ```
 
 `overall_grade` and every module `grade` use the `Grade` set. Grade colours are fixed in section 12.
@@ -729,6 +740,7 @@ Closed set of error codes and their HTTP statuses:
 | `NOT_FOUND` | 404 | generic entity-not-found for anything other than a scan (Phase 2). CONTRACT GAP — see amendment 2.1: §7.6's "cross-org id returns 404" rule needs a code that isn't `SCAN_NOT_FOUND`; used from Step 2 onward (org members, later monitors) |
 | `WEBHOOK_INVALID_SIGNATURE` | 400 | `POST /billing/webhooks/{razorpay,stripe}` (§7.11) rejects a payload whose signature doesn't verify against the configured webhook secret. CONTRACT GAP — see amendment 2.5: not named by the phase prompt's §1.5 error list, needed because "reject unverified with 400" (§Step 6) has nowhere else to hang a machine-readable code |
 | `REPORT_NOT_AVAILABLE` | 409 | `GET .../report.pdf` (§7.14, v2.9) called on a scan whose `status` isn't `completed` — a queued/running/failed scan has no grade, no findings, no modules to render |
+| `INVALID_CAMPAIGN_STATUS` | 409 | `POST .../scan`, `.../pause`, or `.../resume` (§7.16, v3.9) called when the campaign's current `OutreachCampaignStatus` doesn't permit that action — e.g. `.../scan` on a `paused` campaign, `.../pause` on one that isn't `running`. CONTRACT GAP, proposed — not named by `docs/OUTREACH STAGE 2.md`'s own text; `details: {"campaign_status": ..., "action": ...}` |
 
 A hostname that simply doesn't resolve is **not** an HTTP error. It is a `Scan` with `status: "failed"` and `error.code: "SCAN_FAILED"`, so the user still gets a shareable page.
 
@@ -1021,7 +1033,7 @@ A read-mostly, single-operator console for cold outreach and operations. Not par
 
 The `/admin/*` **frontend** pages hold the operator's token in an `httpOnly`, `Secure`, `SameSite=Lax` cookie named `sd_admin` (name proposed), set by a small `/admin/login` form once the token verifies against the API, and forwarded server-side as `X-Admin-Token`. The web app never contains the token itself. `/admin/*` stays out of search two ways, matching `/app/*`: `robots.ts` disallow (already present) plus per-layout `noindex` metadata.
 
-**Read-only rule.** The only non-GET routes are the two prospect-batch routes, and they write **only** to `prospect_batches` / `prospect_scans` / `scans` (§11). No admin route ever writes to `organisations`, `memberships`, `monitored_hostnames`, `subscriptions`, `invoices`, `alert_events`, or `alert_recipients`. No impersonation, no "log in as user", no session borrowing. No raw client IP is read or returned anywhere on this surface.
+**Read-only rule.** Within this section, the only non-GET routes are the two prospect-batch routes, and they write **only** to `prospect_batches` / `prospect_scans` / `scans` (§11). §7.15 (v3.6) adds the admin surface's other non-GET routes — they write **only** to the `outreach_*` tables (§11) and, for scan enqueue, `scans` — added there rather than loosened here. No admin route anywhere writes to `organisations`, `memberships`, `monitored_hostnames`, `subscriptions`, `invoices`, `alert_events`, or `alert_recipients`. No impersonation, no "log in as user", no session borrowing. No raw client IP is read or returned anywhere on this surface.
 
 **"Unknown", never a guess.** Any figure that cannot be computed from a query is returned as `null` and rendered "unknown" — the same rule the scanner runs under (rule 7).
 
@@ -1200,6 +1212,215 @@ Mirrors §7's existing scan-GET pair exactly: same lookup semantics, same `404 S
 **Caching:** the rendered bytes are cached in Redis, keyed on `scan_id`, TTL `PDF_CACHE_TTL_SECONDS` (§4) — a completed scan is immutable, so its PDF is too. A size guard skips caching anything unusually large. No new table (§11 unchanged): this is a cache, not a record.
 
 **Content rules**, binding on the renderer exactly as they are on the web result page: every string comes from the stored `Scan` verbatim — no title, description, or remediation is rewritten, summarised, or re-toned. No grade, score, severity, or count is recomputed; each is read from the stored result. No claim language (no "certified," "compliant," "audited," "penetration test," "security certification" — this is an external, unauthenticated assessment of a single hostname, not a compliance product). No internal detail beyond what the public result page already shows.
+
+---
+
+### 7.15 Outreach orchestrator — Stage 1 (internal, admin-only — v3.6)
+
+Internal GTM tooling (`ROADMAP.md`'s "Internal tooling" section), not a product phase — never customer-facing, never gates a phase. Full design in `docs/OUTREACH_BUILD_SPEC.md`; this stage implements only schema, migration, CSV import, both state machines, and idempotency, per `docs/outreach_stage_1.md`. Same auth as the rest of §7.13: `X-Admin-Token` header or `?token=`, `FORBIDDEN` on failure, no session, no `current_user`.
+
+**Boundary with `prospect_batches`/`prospect_scans` (§7.13, v2.8).** Both are live: that table pair stays the ad-hoc "paste hostnames, no agency" batch scanner it already is; `outreach_*` is the structured per-agency campaign pipeline. Neither replaces the other — an operator wanting a quick one-off portfolio check before an agency is even in the CRM still uses `/admin/prospects`; a qualified agency with a contact goes through `/admin/outreach`. Both are prospect-scan producers, and both must stay excluded from every customer-facing surface with the same rigor. Confirmed empirically before this amendment: `/admin/prospects` (API + page) is fully built, not the never-built Stage 5 item it was believed to be, but `SELECT count(*) FROM prospect_batches` / `prospect_scans` both returned `0` in the current database — built, unused so far, kept regardless per the paragraph above.
+
+**Forward note on `/admin/funnel` (§7.13).** `build_funnel_report`'s prospect-scan exclusion currently checks `NOT EXISTS` against `prospect_scans.scan_id` only. Stage 1 never populates `outreach_domains.scan_id` (no scanning happens until Stage 2 of the spec), so no code change is needed yet and the exclusion holds trivially today. It stops holding the moment Stage 2 ships: that `NOT EXISTS` must be extended to check `outreach_domains.scan_id` as well, not instead — flagged here now for the same reason `outreach_messages` is flagged below, so Stage 2 doesn't have to rediscover it.
+
+**`outreach_messages` is defined in §11 now but unused until Stage 4** (templates, PDF attach, Gmail draft creation) of the spec. Its columns exist so the migration in Step 2 doesn't need a second pass; nothing writes to this table in Stage 1.
+
+```
+POST /api/v1/admin/outreach/campaigns
+{ "name": "Clutch agencies — Sept batch" }
+-> 201 OutreachCampaign
+
+GET /api/v1/admin/outreach/campaigns?page=&per_page=
+-> 200 { /* PaginatedList<OutreachCampaignRow>, §6.14, newest first */ }
+
+GET /api/v1/admin/outreach/campaigns/{campaign_id}
+-> 200 OutreachCampaignRow
+   404 NOT_FOUND                         // unknown campaign_id — added in Step 5, not named by
+                                          // docs/outreach_stage_1.md's own four-endpoint list: the
+                                          // review page needs a campaign's own name/status and
+                                          // nothing else fetches one. Same GET-by-id precedent
+                                          // AdminProspectBatchDetail (§7.13) already set.
+
+POST /api/v1/admin/outreach/campaigns/{campaign_id}/import
+   multipart/form-data, field "file": the CSV (§17)
+-> 200 OutreachImportReport
+   404 NOT_FOUND                         // unknown campaign_id
+   422 VALIDATION_ERROR                  // file-level failure — see below
+   403 FORBIDDEN
+
+GET /api/v1/admin/outreach/campaigns/{campaign_id}/prospects?state=&page=&per_page=
+-> 200 { /* PaginatedList<OutreachProspectRow>, §6.14 */ }
+   404 NOT_FOUND                         // unknown campaign_id
+```
+
+**File-level vs. row-level failure — a decision the spec doesn't make explicit, made and documented rather than left implicit.** `422 VALIDATION_ERROR` (existing code, reused per §7.4's own pattern, not a new one) is for the whole file: not valid UTF-8 CSV, no header row, zero data rows, or row count over `OUTREACH_MAX_IMPORT_ROWS` (§4) — nothing is imported, nothing is stored. Everything §17.4 calls "reject and report" — one bad hostname, one missing required column, one suppressed email, one duplicate row — is a **row-level** outcome: the request still returns `200`, and that row surfaces in `OutreachImportReport.rejected_rows`/`suppressed_agencies`/`warnings` instead. Nothing imports silently either way (§17.5's own rule), but a malformed file and a mostly-good file with a few bad rows are different failures and get different HTTP treatment.
+
+#### `OutreachCampaign`
+
+```jsonc
+{
+  "campaign_id": "b2b6...",
+  "name": "Clutch agencies — Sept batch",
+  "status": "draft",                    // OutreachCampaignStatus
+  "created_at": "2026-09-17T10:00:00Z"
+}
+```
+
+#### `OutreachCampaignRow` — `GET /admin/outreach/campaigns`
+
+```jsonc
+{
+  "campaign_id": "b2b6...",
+  "name": "Clutch agencies — Sept batch",
+  "status": "draft",
+  "created_at": "2026-09-17T10:00:00Z",
+  "prospect_count": 47,
+  "state_counts": {                     // every OutreachProspectState key always present, 0 not omitted
+    "pending": 47, "scanning": 0, "analyzing": 0, "suppressed": 0, "drafting": 0,
+    "ready_for_review": 0, "sent": 0, "replied": 0, "failed": 0, "skipped": 0
+  }
+}
+```
+
+#### `OutreachProspectRow` — `GET /admin/outreach/campaigns/{campaign_id}/prospects`
+
+The bare list Stage 1's Step 5 asks for — enough to confirm an import worked, not the Stage 5 review UI (hook reasoning, editable draft, attachments).
+
+```jsonc
+{
+  "prospect_id": "9c1a...",
+  "agency_name": "Decipher Zone Technologies",
+  "contact_name": "Rahul",             // nullable
+  "contact_email": "rahul@decipherzone.com",
+  "state": "pending",                  // OutreachProspectState
+  "state_reason": null,
+  "domain_count": 3,
+  "created_at": "2026-09-17T10:00:05Z"
+}
+```
+
+`state` query param filters by `OutreachProspectState`; unrecognised value is `422 VALIDATION_ERROR`, matching how every other closed-set query filter in this contract behaves.
+
+#### `OutreachImportReport` — §17.5
+
+```jsonc
+{
+  "imported_agencies": 47,
+  "imported_domains": 142,
+  "skipped_agencies": 3,                // contact_email already a prospect in this campaign — re-import is a no-op, not an error
+  "suppressed_agencies": 1,             // contact_email present in outreach_suppressions
+  "rejected_rows": [
+    { "row_number": 12, "reason": "invalid hostname: not-a-domain" },
+    { "row_number": 30, "reason": "missing contact_email" }
+  ],
+  "warnings": [
+    { "contact_email": "rahul@decipherzone.com", "message": "agency_name differs across rows for this email; used the first value" }
+  ]
+}
+```
+
+`row_number` is 1-indexed over data rows, the header excluded (row 1 is the first data row, matching what an operator sees if they open the CSV and count past the header). Re-importing the same file twice must produce the same `imported_agencies`/`imported_domains` on the first pass and `skipped_agencies` equal to the first pass's `imported_agencies` on the second, with `rejected_rows`/`warnings` empty the second time — the idempotency test Step 3 must write.
+
+---
+
+### 7.16 Outreach orchestrator — Stage 2 (internal, admin-only — v3.9)
+
+Batch scanning: `docs/OUTREACH STAGE 2.md` Step 1, full design in `docs/OUTREACH_BUILD_SPEC.md`. Same auth as the rest of the outreach admin surface (§7.15): `require_admin_token`, no second dependency. Contract-only in this amendment — the runner, the four endpoints' actual handlers, and the frontend controls are Steps 2-5 of the stage prompt.
+
+**Campaign-status transitions — a gap the stage prompt doesn't name, resolved here because §7.16's own endpoints need it.** Stage 1's state machine module (`app/outreach/state_machine.py`) transitions prospects, domains, and messages, but never a campaign's own `OutreachCampaignStatus` — nothing needed to before Stage 2. "Respect campaign status... make sure it works" (the stage prompt's own words) requires one. New `transition_campaign()`, Step 2's addition, same closed-set-and-log discipline as the other three:
+
+```
+draft   -> running
+running -> paused
+running -> complete   -- edge exists, unused by any Stage 2 code path (nothing in this stage
+                       -- ever sets a campaign complete) — same "defined now, used later" treatment
+                       -- outreach_messages got in v3.6. Stage 5's concern.
+paused  -> running
+```
+
+No edge out of `paused` back to `draft`, and no way to pause a `draft` campaign — pausing something that was never running doesn't mean anything. An attempt at any transition not listed raises `IllegalTransitionError`, same as every other entity.
+
+**The three endpoints below are deliberately not one shared "set status" action**, because they mean different things at the HTTP boundary, not just different enum values:
+
+```
+POST /api/v1/admin/outreach/campaigns/{campaign_id}/scan?include_weak=false
+-> 202 OutreachCampaignRow   -- transitions draft -> running (no-op if already running, though
+                             -- include_weak is still updated either way)
+   404 NOT_FOUND
+   409 INVALID_CAMPAIGN_STATUS   // campaign is paused (resume it first, deliberately — see below) or complete
+
+POST /api/v1/admin/outreach/campaigns/{campaign_id}/pause
+-> 200 OutreachCampaignRow   -- running -> paused
+   404 NOT_FOUND
+   409 INVALID_CAMPAIGN_STATUS   // campaign isn't running
+
+POST /api/v1/admin/outreach/campaigns/{campaign_id}/resume
+-> 202 OutreachCampaignRow   -- paused -> running
+   404 NOT_FOUND
+   409 INVALID_CAMPAIGN_STATUS   // campaign isn't paused
+
+GET /api/v1/admin/outreach/campaigns/{campaign_id}/scan-progress
+-> 200 OutreachScanProgress
+   404 NOT_FOUND
+```
+
+**Correction from Step 1's own first draft, made once Step 2 actually decided the runner's shape (v3.10).** None of these three POST endpoints enqueue anything. `app/outreach/scanner.py`'s `outreach_scan_tick` (an arq cron job, not a job-per-batch — see that module's own docstring for why) already runs on a fixed schedule, every `OUTREACH_SCAN_DELAY_SECONDS`, and on each tick claims work for every campaign it finds at `running`. All three endpoints are therefore synchronous flag flips (plus, for `.../scan`, setting `include_weak_prospects`) — the *next* tick, at most `OUTREACH_SCAN_DELAY_SECONDS` later, is what actually starts or resumes claiming. `202` is kept for `.../scan`/`.../resume` (not `200`) purely to signal "the effect isn't visible yet, wait a tick," matching this codebase's existing convention for actions whose consequence lands asynchronously, even though the HTTP response itself completes immediately either way. Domains already claimed before a pause (state `RUNNING`) are unaffected by any of this — the tick's own *settlement* step (as opposed to its claim step) runs for `paused` campaigns exactly as it does for `running` ones, so in-flight work always finishes.
+
+**Why `.../scan` refuses a `paused` campaign instead of silently resuming it.** A generic "start scanning" button that also happens to un-pause would make pause one accidental click away from meaningless — exactly the "reached for during an incident and it doesn't work" failure the human sign-off on `paused` (§5, v3.6) was about. `.../resume` is the one deliberate way back from `paused`; `.../scan` only ever moves a campaign forward from `draft`, or nudges an already-`running` one (harmless — see idempotency below).
+
+**`.../scan` is idempotent by design, not by rejecting repeats.** Calling it on an already-`running` campaign is a no-op on status (just re-applies `include_weak`) rather than erroring. This is deliberately different from `.../pause`/`.../resume` on the *wrong* status, which *does* 409 — pausing something not running, or resuming something not paused, is almost certainly an operator or client bug worth surfacing, where calling `.../scan` again on a campaign that's already going is not.
+
+**`include_weak`** (query param, default `false`): domains belonging to a prospect with `icp_grade = 'weak'` (§17.2) are skipped by the runner's eligibility query unless this is set — "no reason to spend scans on prospects already judged poor" (spec, unchanged by this amendment). Prospects already imported before this flag existed are unaffected; they simply wait for a batch run with `include_weak=true`.
+
+#### `OutreachScanProgress` — `GET .../scan-progress`
+
+Folds Step 6's ("measure the batch") metrics into the same payload as Step 5's live progress, rather than a second endpoint neither the stage prompt's Step 5 endpoint list nor its frontend description names. They're the same underlying query over `outreach_domains`/`scans` either way, and Step 6's own text ("If the clean rate drifts below 95% on a real batch, I want to see it on the page") asks for this to be visible *during* a batch, not only after — so `metrics` is always live-computed, not a value frozen at batch end.
+
+```jsonc
+{
+  "campaign_id": "b2b6...",
+  "campaign_status": "running",              // OutreachCampaignStatus
+  "domain_state_counts": {                   // every OutreachDomainState key always present, 0 not omitted — same rule as OutreachCampaignRow.state_counts (§7.15)
+    "pending": 10, "running": 2, "completed": 120, "completed_partial": 8, "retrying": 3, "failed": 7
+  },
+  "in_flight": 2,                            // count where state == "running" specifically, not retrying/pending
+  "started_at": "2026-09-17T20:00:00Z",      // nullable — MIN(outreach_domains.updated_at) among domains where state != "pending"; null before the first claim of this campaign, ever (persists across a pause/resume cycle — this is the campaign's scanning history, not "this run's")
+  "estimated_completion_at": "2026-09-17T20:38:00Z",  // nullable, see formula below
+  "recent_outcomes": [
+    {
+      "domain_id": "44444444-...",
+      "hostname": "client.example.com",
+      "prospect_id": "33333333-...",
+      "agency_name": "Acme Agency",
+      "state": "completed",                  // OutreachDomainState, always one of completed|completed_partial|failed
+      "scan_error": null,
+      "settled_at": "2026-09-17T20:05:00Z"   // the domain's own updated_at
+    }
+    // newest 20 domains currently in a terminal state (completed|completed_partial|failed),
+    // ordered by updated_at desc — a RETRYING domain's earlier failed attempt never appears
+    // here on its own, only once it finally settles
+  ],
+  "metrics": {
+    "clean_rate": 0.85,                      // COMPLETED / total domains in the campaign (Step 6's own literal formula) — not / attempted-so-far, so this reads low early in a batch by design
+    "completed_partial_count": 8,
+    "completed_partial_by_module_error": { "MODULE_TIMEOUT": 5, "CONNECTION_RESET": 3 },   // ModuleErrorCode keys actually present only, never zero-filled — read per domain from its scan's incomplete_modules (§6.1, v3.0) and that module's own ModuleResult.error.code (§6.2); a module with no error code (e.g. skipped with none recorded) contributes to completed_partial_count but not to this breakdown
+    "failed_count": 7,
+    "failed_by_reason": { "CONNECTION_REFUSED after 3 attempts": 4, "MODULE_TIMEOUT after 3 attempts": 3 },  // grouped by the exact scan_error string (§11) — Step 3's own rule that scan_error holds a ModuleErrorCode or a structured reason, not free text, is what keeps this grouping meaningful rather than one bucket per row
+    "median_scan_duration_ms": 1850,
+    "p95_scan_duration_ms": 4200,            // both computed over scans.duration_ms for every domain in the campaign with a non-null scan_id, regardless of current domain state — a RETRYING domain's scan_id still points at its most recent (failed) attempt, and that attempt's duration is real data about how long it took
+    "retried_and_rescued_count": 4,          // domains with scan_attempts > 1 whose final state is completed or completed_partial — the retry mechanism visibly earning its keep
+    "total_wall_time_ms": 1520000            // null iff started_at is null; else now - started_at while anything remains pending/running/retrying, frozen at MAX(updated_at) - started_at once nothing does
+  }
+}
+```
+
+**`estimated_completion_at` formula**, since "never guess" (rule 7) applies to estimates too — state the method, don't hand-wave it: null until at least `MIN_SETTLED_FOR_ESTIMATE = 10` domains have settled, not merely one — two domains out of 150 is not a basis for a completion time, the same "don't show a precision the data doesn't support" principle behind the partial-scan score ceiling (§9 Step 4b, v3.4). Once that sample exists: `now + remaining × (elapsed_since_started ÷ settled_count)`, where `remaining` is the count of domains still `pending`/`running`/`retrying`. Self-correcting as the batch progresses — it reflects this campaign's actual observed pace (including real retry overhead), not a naive `remaining × OUTREACH_SCAN_DELAY_SECONDS` that ignores failures. Below the threshold, `domain_state_counts` already tells the operator how many have settled — the honest answer is "not enough data yet," not a number that looks precise and isn't.
+
+**Retry-count semantics, pinned down because "retries" is ambiguous on its own.** `OUTREACH_MAX_SCAN_RETRIES=2` means 2 retries *after* the first attempt — 3 total attempts before a domain becomes `FAILED`. `scan_attempts` (§11) counts total attempts, starting at 0: incremented to 1 on the first attempt; on failure, `RETRYING` while `scan_attempts <= OUTREACH_MAX_SCAN_RETRIES`, `FAILED` once it exceeds it. Read literally, "retries" means attempts beyond the first, and this is the reading that matches that English sense rather than an off-by-one alternative — flagged as a decision, not assumed silently, since the stage prompt states the number but never the exact boundary condition.
+
+**`ModuleErrorCode`/finding data read through `parse_stored_scan()` (v3.5), never raw JSONB traversal** — same rule §7.15's `hook_finding_code` note already established for Stage 4's future reads of `scans.result`. `completed_partial_by_module_error` is the first *implemented* reader of that path from inside the outreach orchestrator; it inherits version tolerance for free rather than assuming every stored scan matches the current contract shape.
+
+**Forward note on `/admin/funnel` (§7.13), closing what v3.6 flagged rather than fixed.** `build_funnel_report`'s prospect-scan exclusion (`app/admin/funnel.py`) checks `NOT EXISTS` against `prospect_scans.scan_id` only. Stage 2 is the point v3.6 said would break that — `outreach_domains.scan_id` starts getting populated here for the first time. The exclusion becomes a second `NOT EXISTS` against `outreach_domains.scan_id`, not a replacement of the first (both prospect-scan producers stay excluded, per §7.15's boundary note) — implemented in Step 2, verified in this stage's own verification list ("`/admin/funnel` counts are unchanged by a batch... with before-and-after numbers").
 
 ---
 
@@ -1444,9 +1665,111 @@ prospect_scans (              -- one row per hostname in a batch. The scan itsel
 
 unique (batch_id, hostname)
 index prospect_scans_batch_id_idx on prospect_scans (batch_id)
+
+outreach_campaigns (            -- Outreach orchestrator Stage 1 (§7.15, v3.6). Internal GTM
+  campaign_id   uuid primary key,   -- tooling, never customer-owned, same posture as prospect_batches.
+  name          text not null,
+  status        varchar(24) not null,      -- OutreachCampaignStatus (§5)
+  created_at    timestamptz not null default now()
+)
+
+outreach_prospects (
+  prospect_id    uuid primary key,
+  campaign_id    uuid not null references outreach_campaigns,   -- no ON DELETE: a campaign with
+  agency_name    text not null,                                  -- prospects must be emptied
+  agency_website text,                                           -- explicitly before it can be
+  contact_name   text,                                           -- deleted, not silently cascaded
+  contact_email  text not null,
+  source         varchar(32),         -- §17.2 CSV enum (clutch|goodfirms|designrush|sortlist|manifest|linkedin|google|other) — a Python-level closed set (app/outreach/), not promoted to §5: nothing outside the CSV importer reads it yet
+  icp_grade      varchar(24),         -- §17.2 CSV enum (strong|potential|weak) — same treatment as source
+  state          varchar(32) not null,      -- OutreachProspectState (§5)
+  state_reason   text,
+  do_not_contact boolean not null default false,
+  notes          text,
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now(),
+  unique (campaign_id, contact_email)     -- the idempotency key for import (§17.4.4)
+)
+
+index outreach_prospects_campaign_state_idx on outreach_prospects (campaign_id, state)
+
+outreach_domains (
+  domain_id     uuid primary key,
+  prospect_id   uuid not null references outreach_prospects on delete cascade,
+  hostname      varchar(253) not null,   -- through §7.2 normalisation + §10 safety guard at import, always
+  relationship  varchar(16) not null default 'client',   -- 'client' | 'own' (agency_website rows)
+  state         varchar(24) not null,      -- OutreachDomainState (§5)
+  scan_id       uuid references scans(scan_id),   -- no ON DELETE — see note below
+  scan_attempts integer not null default 0,
+  scan_error    text,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now(),
+  unique (prospect_id, hostname)     -- the idempotency key for domain processing (§17.4.4)
+)
+
+index outreach_domains_prospect_state_idx on outreach_domains (prospect_id, state)
+
+outreach_messages (          -- defined now, unused until Stage 4 (templates/PDF/Gmail draft) —
+                              -- see §7.15. Do not read this as having been missed.
+  message_id         uuid primary key,
+  prospect_id        uuid not null references outreach_prospects on delete cascade,
+  hook_code          varchar(48) not null,
+  hook_domain_id     uuid not null references outreach_domains,   -- no ON DELETE: cascades
+  hook_scan_id       uuid not null references scans(scan_id),      -- transitively via prospect_id
+  hook_finding_code  varchar(64),
+  secondary_domain_ids uuid[],       -- soft references, no FK (array columns can't carry one) —
+  template_variant   smallint not null,   -- read at draft time through parse_stored_scan(), never
+  subject            text not null,        -- copied, same §4.2 rule as hook_scan_id/hook_finding_code
+  body               text not null,
+  attachment_scan_ids uuid[],       -- soft references, same caveat as secondary_domain_ids
+  gmail_draft_id     text,
+  gmail_message_id   text,
+  state              varchar(24) not null,      -- OutreachMessageState (§5)
+  state_reason       text,               -- v3.7. Same purpose as outreach_prospects.state_reason —
+                                          -- why a transition failed (Gmail API rejection, PDF
+                                          -- wouldn't generate, attachment over Gmail's size limit).
+                                          -- The log alone was ruled insufficient in-session: a
+                                          -- missing draft at 9am needs an answer on the review page,
+                                          -- not a log grep. Distinct from reply_note (already present
+                                          -- since v3.6): that records what a human said back, this
+                                          -- records why the pipeline itself failed.
+  state_changed_at   timestamptz not null default now(),  -- v3.7. One column every transition
+                                          -- writes, not a timestamp per state — "sitting in
+                                          -- READY_FOR_REVIEW for six days" is answerable from this
+                                          -- alone, without a history table. drafted_at/sent_at/
+                                          -- replied_at stay: they're what §12's metrics measure.
+  drafted_at         timestamptz,
+  sent_at            timestamptz,
+  replied_at         timestamptz,
+  reply_note         text,
+  created_at         timestamptz not null default now(),
+  unique (prospect_id)     -- one email per agency (§6.1 of the spec) — the idempotency key for draft
+                           -- creation, and for the regenerate path below: one row, updated in place
+)
+
+outreach_suppressions (      -- permanent, standalone — deliberately has no FK to any of the tables
+  email      varchar(320) primary key,   -- above, so an opt-out survives a campaign or prospect
+  reason     varchar(32) not null,       -- being deleted (DPDP: honoured immediately, never lapses)
+  created_at timestamptz not null default now()
+)
 ```
 
-`prospect_batches` / `prospect_scans` are the v2.8 admin dashboard's only schema additions. The scheduler "last successful run" figure (§7.13) is derived from `scans` (newest scheduler-originated row), not a table or a Redis key. Prospect scans are excluded from `daily_stats` and from every §7.x customer endpoint by construction (`scans.monitor_id` stays `null`, and no org owns them).
+**`OutreachMessageState` transitions, v3.7 — the closed set §5.3 of the spec now draws explicitly, `outreach_messages` still being unused doesn't excuse the graph from being defined precisely:**
+
+```
+DRAFTED → READY_FOR_REVIEW → SENT → REPLIED
+   ↑              ↓
+   └──────────────┤
+                  ↘ DISCARDED
+```
+
+`READY_FOR_REVIEW → DRAFTED` ("regenerate", spec §11 review UI) is the one addition over the original diagram — signed off in-session after the human caught that the original, edge-less diagram made "regenerate" impossible to express. `SENT` still goes only to `REPLIED`: once sent, regenerating would be a lie about what actually left the building, so nothing else is legal from there. `unique(prospect_id)` (above) is unchanged and is exactly why regenerate updates the existing row rather than creating a second one — it is this table's idempotency key (§10 of the spec), not merely a data-integrity nicety.
+
+Two rules bind whoever implements regenerate (spec Stage 4), recorded now while the table is still unused rather than left to be rediscovered once it isn't: (1) delete the prospect's existing Gmail draft via the Gmail API *before* creating the replacement, and null `gmail_draft_id` as part of that same step, before the new draft is created — never let the column hold an id Gmail no longer has, even transiently; (2) bump `template_variant` on every regenerate — a message worth re-drafting is a message whose first variant probably read wrong, so hand the operator different copy, not the same text again. Both are business-logic obligations on the *caller*, not on the transition function itself: `app/outreach/state_machine.py`'s `transition_message` has no Gmail API access and cannot perform the deletion, but it does null `gmail_draft_id` and bump `template_variant` itself as part of the `READY_FOR_REVIEW → DRAFTED` transition, since that edge has no other legal source in the graph above — entering `DRAFTED` via a transition (as opposed to a message's initial creation, which never goes through this function at all) can only ever mean "regenerate." If the new draft's creation then fails partway, the message simply stays at `DRAFTED` with `state_reason` set — visibly incomplete on the review page rather than silently stale.
+
+**Delete-behaviour decision on `scan_id`/`hook_scan_id` (`outreach_domains`, `outreach_messages`) — this is not a third `scans` ↔ `monitored_hostnames`-style cycle.** That earlier bug was a genuine cycle: two tables each referencing the other. Here the reference is one-directional (`outreach_domains`/`outreach_messages` → `scans`; nothing on `scans` points back), so there is no cycle to create. The stage prompt's fallback — "if deleting a scan would block deleting a prospect, use `ON DELETE SET NULL`" — doesn't actually arise: deleting a prospect cascades to delete its own `outreach_domains`/`outreach_messages` rows directly (`ON DELETE CASCADE` on `prospect_id`), and never needs to delete the `scans` row itself to do so. No code path in this codebase deletes a `scans` row today (checked: no retention/purge job exists). Given that, `scan_id`/`hook_scan_id` are left at the **default** (`ON DELETE` omitted, i.e. `RESTRICT`) rather than `SET NULL`: `hook_scan_id` is `NOT NULL` so `SET NULL` isn't even legal there, and for `outreach_domains.scan_id` specifically, silently nulling a completed domain's only link to its evidence would let a domain sit at `state: "completed"` with nothing to back it up — exactly the "never guess, never silently drift" failure rule 7 and the scan-corruption postmortem (§14 v3.5) exist to prevent. If a real need to delete `scans` rows ever appears, it should delete or reassign the referencing `outreach_*` rows explicitly first, not have them silently orphaned.
+
+`prospect_batches` / `prospect_scans` are the v2.8 admin dashboard's only schema additions. The scheduler "last successful run" figure (§7.13) is derived from `scans` (newest scheduler-originated row), not a table or a Redis key. Prospect scans are excluded from `daily_stats` and from every §7.x customer endpoint by construction (`scans.monitor_id` stays `null`, and no org owns them). The same construction — `monitor_id` stays `null`, no `org_id` anywhere in the `outreach_*` tables — holds for outreach domain scans; see §7.15's forward note on extending `/admin/funnel`'s exclusion once Stage 2 starts populating `outreach_domains.scan_id`.
 
 The full result lives in `result` as JSONB. Top-level columns are duplicated for querying and listing only. **Raw client IPs are never stored** — DPDP hygiene starts now, not later.
 
@@ -1540,5 +1863,11 @@ A phase is complete only when all of these are true:
 | 3.2 | 2026-09-13 | PDF cover polish (`docs/PDF_FIXES.md` Polish item 1, human sign-off in-session): the `SUN-DRAM` wordmark and logo on the PDF cover only. **CONTRACT GAP flagged and resolved in-session** — §12's type scale is locked to `Space Grotesk` for display, and Playfair Display is not a token this contract names anywhere; the human asked for it explicitly for this one element, so it's recorded here as a third documented exception (`app/pdf/fonts.py`/`app/pdf/styles.py`'s docstrings name the first two — the cover logo's own gold colouring and, as of this line, the wordmark's face), not a silent drift from the design system, and scoped to `.cover-wordmark` only — every other heading in the PDF and every heading anywhere in the web app stays on `Space Grotesk`. Playfair Display Black (OFL, Google Fonts) bundled as `app/pdf/fonts/PlayfairDisplay-Black.woff` alongside the existing bundled faces, registered in `font_face_css()`, embedding asserted by `tests/test_pdf_render.py::TestFontEmbedding`. `.cover-logo` grown `32mm → 44mm` per the same request. No JSON-contract surface change — `schemas.py`/`contract.ts` untouched. |
 | 3.4 | 2026-09-13 | Headers-module reliability, structured module errors, and honest partial-result presentation (`docs/Fix headers and incomplete.md` Steps 1-5). **Step 1/2:** `letshego.com` reproducibly failed the `headers` module — diagnosed directly (not guessed): port 80 silently black-holes every TCP connect (no RST, no response), and the module's plaintext HTTP redirect-probe shared its request timeout with `PER_MODULE_TIMEOUT_SECONDS`, so that one doomed connection alone consumed the entire module budget, starving the working HTTPS probe of the time it needed even though HTTPS alone succeeds in well under a second. New `app/safety.py` constant `HTTP_REDIRECT_PROBE_TIMEOUT_SECONDS = 3.0` (same pattern as the existing `RENEGOTIATION_PROBE_TIMEOUT_SECONDS`), and the HTTP probe in `app/scanner/headers.py` now runs under its own `asyncio.wait_for` using it. A second, different failure of the same *class* was found checking the grading-validation domain list as instructed: `tls-v1-0.badssl.com` redirects `:443 → :1010` (a port outside §10's allowlist) and `safe_get()` was discarding the real, already-fetched `:443` response and raising, taking the whole module down. `safe_get()`'s redirect loop now stops and returns the last successfully-fetched response when the *next* hop is disallowed (port, scheme, or host), rather than raising — the very first hop still raises, since there's nothing to fall back to. Neither change touches which targets are permitted (§10 unchanged) — only what happens to data already, legitimately fetched when the *next* hop isn't. Verified against the full grading-validation domain list: 21 of 23 complete cleanly; the remaining two (`sundram.tech`, a pre-existing separately-tracked issue; `irctc.co.in`, an origin that stopped responding to this container's traffic mid-session, reproducible but outside this fix's scope) are neither of the two bug classes above. `letshego.com` added to the accuracy harness (`tests/accuracy/corpus.py`/`run.py`) with a hard assertion that `headers` specifically completes, not just "didn't crash". **Step 3:** new §5 enum `ModuleErrorCode` and new §6.2 shape `ModuleError` (`code` + `message`) — `ModuleResult.error` changes from a bare `str \| None` (occasionally the raw exception text) to `ModuleError \| None`, populated by `app/safety.py`'s new `classify_module_exception()` (exhaustive `isinstance` classification of every exception type this scanner's own connection helpers are known to raise, `UNEXPECTED_ERROR` as an honest fallback rather than a guess) and built in `app/scanner/__init__.py`'s `run_module`, the one place every module's exception handling lives. The full exception — type, message, traceback — goes to the application log (`logger.exception`, correlated by module and hostname; scans run in the arq worker, outside any HTTP request, so there is no per-request `request_id` to attach here, unlike §7.4's error envelope) and never into the response; `message` is a safe, generic, user-facing sentence for every code except `MODULE_TIMEOUT`, which names the module's own label and actual timeout value. Found and fixed while building this: the log call's own `extra={"module": ...}` key collided with Python's stdlib `LogRecord.module` attribute and raised *inside* the logging call itself, silently taking the whole exception-logging path down — caught only because a test exercised the actual failure path, not just the happy path; renamed to `scan_module`. `apps/web/types/contract.ts` and `apps/web/components/scan/ModuleCard.tsx` (the one frontend consumer of this field) updated in the same edit. **Step 4:** the §9 Step 4b "Presentation of `is_complete: false`" rule (v3.0) is extended, not replaced — §4.1: the banner names which check(s) failed (`incomplete_modules`' labels) and, for exactly one incomplete module, a short reason clause keyed off `ModuleErrorCode` (new `_REASON_PHRASE` table, duplicated in `IncompleteAssessmentBanner.tsx` and `template.py` same as `_GRADE_TONE`/`gradeTone()`). §4.2: `overall_score` renders as `"{score} or lower"`, never a bare number, whenever `is_complete: false` and `certificate` itself completed (`GradeDial.tsx`'s new `scoreIsCeiling`, `_grade_row_html`'s new `is_complete` parameter) — chosen over suppressing the number, on the grounds that the bias's direction and rough size is itself useful and withholding a computed number reads as evasive; the letter grade is never caveated this way, since `band(overall_score)` is exact arithmetic regardless of what the true score might be. §4.3: a failed module's card/table row shows `ModuleResult.error.message` in place of the generic `summary` string (`ModuleCard.tsx`, `_modules_table_html`). All three verified rendering identically on the public page, the dashboard, and an actual rendered PDF (cover + executive summary + module table) — not just asserted in isolation. **Step 5:** two small ones. Timezone: the public scan report's own "Scanned at" timestamp printed UTC while the PDF report *of the same scan* printed IST (UTC+05:30) — standardised on IST, this product's own market (`apps/web/lib/format.ts`'s new `formatDateTimeDisplayIst`, matching `template.py`'s `_format_datetime_ist` exactly), scoped to that one shared timestamp only — `formatDateTimeDisplay` (UTC) is untouched for its other callers (admin ops pages, alert-event timestamps), which aren't the "two documents about the same scan disagree" problem this closes. `grade_cap_reason`: see the §9 Step 2b/§6.1 entries above — the "reduced by" line no longer fires when the severity budget and the weighted mean band the same, closing the exact "A+ · Score 98/100 · A+ — reduced by 2 low-severity findings" case the doc named. |
 | 3.3 | 2026-09-13 | Grading recalibration (`docs/FIX_GRADING.md`, analysed and validated in-session before any code changed, per the doc's own "do not start coding" gate — human sign-off on both open decisions below). Two faults: **Fault A** — Step 2's per-module deduction-then-average dilutes severity almost to nothing (a `high` finding costs 25 points inside `headers`, ~4 points overall at `headers`' 16% weight), so Step 4's old two-or-more-`high` cap existed only to patch the resulting letter, and did so bluntly — two highs and eight highs both landed `C`. **Fault B** — `readiness` was weighted `0` ("informational only") yet a `high`-severity `READINESS_MANUAL_2027` finding still fed the two-high cap, so a module contributing nothing to the score could still veto the letter. §9 Step 2 gains **Step 2b**, a scan-wide severity budget independent of module weight (`critical 40 / high 12 / medium 5 / low 1 / info 0`, same Gate A A4 code exclusions as before) — `overall_score` is now `min(weighted mean, Step 2b budget)`, computed once in `app/grading.py`'s new `compute_global_score()`. Step 4's two-high cap is **removed outright**: with the score itself no longer diluted, patching the letter on top is no longer needed, and `overall_grade` is now always exactly `band(overall_score)` except for the one surviving override (any `critical` finding forces `F`, unconditional, unchanged). `readiness` moves from weight `0` to `12` (closing Fault B), the other six scaled down proportionally from their v1.0 values to make room (`certificate 30→27, tls 22→19, chain 16→14, headers 16→14, email_auth 8→7, dns 8→7`, still summing to 100) — human sign-off in-session on giving readiness real weight over the alternative (keep it at 0 and drop its findings from Step 2b too), on the grounds the doc itself argued and the codebase's own module docstring already asserted: 2027 readiness is this product's differentiator, not a footnote. `grade_cap_reason` (v3.1) is reworded, not removed, per the doc's explicit "one thing to keep": it now names *either* the critical override (`"capped by {n} critical-severity finding(s)"`, the one remaining letter/score disagreement) *or*, when Step 2b's budget — not the weighted mean — set the score, `"reduced by {n} {severity}-severity finding(s)"` (naming the highest severity tier present) — `null` otherwise. Validated by hand against all four of the doc's worked examples (sundram.tech, google.com, outsideinteractive.com, badssl.com) before implementing; all four landed on the doc's own proposed grade and score. No change to Step 1 (per-module scoring), Step 3 (bands), Step 4b (incompleteness), or module-level grading (`grade_module`) — this amendment is scoped to the overall score/grade only. `app/copy.py`-adjacent housekeeping: `grading.py`'s old `compute_overall_score()` is renamed `compute_weighted_score()` (it's now one of two inputs, not the overall score itself) and the unused `_cap_grade()`/`GRADE_ORDER` helpers (only ever used by the removed cap) are deleted rather than left dead. **These grades supersede all previously issued ones** — a report generated before this amendment may show a different letter or score for the same hostname today. |
+| 3.10 | 2026-09-17 | Outreach orchestrator, Stage 2 Step 2 implementation (`docs/OUTREACH STAGE 2.md` Step 2, human sign-off on the two follow-up checks below). The batch scan runner: a periodic arq cron tick (`app/outreach/scanner.py`'s `outreach_scan_tick`, registered in `app/worker.py`), not one long-running job per batch — arq's `job_timeout` is one fixed value shared by every job type this worker runs (this arq version's `enqueue_job` has no per-call override), sized for a single scan (~35s); a ~40-minute job would be killed long before finishing. Every scan is enqueued as the *existing* `run_scan_job`, unchanged, exactly as `app/scheduler.py` already enqueues one for a due monitor — the literal reading of the stage prompt's "same mechanism the monitor scheduler uses." Settlement is polled, not pushed: each tick reconciles every `RUNNING` domain against its linked scan's real status (`scan_compat.parse_stored_scan`, never raw JSONB), rather than `run_scan_job` knowing anything about `outreach_domains` (spec §2.1's separation). New `transition_campaign()` in the Stage 1 state machine module (§7.16's flagged gap, now built): `draft->running`, `running->paused`, `running->complete` (still unused), `paused->running`. New column `outreach_campaigns.include_weak_prospects` (migration `0011`) — Stage 1's schema had nowhere to persist `.../scan`'s `include_weak` choice once scanning moved to a decoupled tick that outlives the one request that set it; found while implementing, not anticipated in the Step 1 contract diff, added now rather than deferred since the table is still admin-internal and unused by anything else. `/admin/funnel`'s exclusion (flagged at v3.6, promised for this step) now also checks `NOT EXISTS` against `outreach_domains.scan_id`, alongside — not instead of — `prospect_scans` (§7.13's boundary note). New helper `completed_domains_for_prospect()` (spec §5.2), so Stage 3's hook selection can query it directly rather than needing to remember the `COMPLETED_PARTIAL` exclusion itself. Two real bugs found live, not by inspection — both per the human's explicit request to verify this stage's behaviour running, not just read: (1) **the worker container was silently running stale code the entire session** — its Docker image bakes a build-time copy of the `app` package into site-packages, and arq's own CLI (`sys.path.append(os.getcwd())`, appending rather than prepending) resolves that frozen copy ahead of the live bind-mounted source for any script-style invocation, unlike `python -c`/uvicorn's own reload mechanism, which don't have this problem — `docker compose build worker` now required after any worker-relevant edit, not just a restart; flagged to the user directly as a standing workflow gap, not fixed at the infrastructure level in this amendment. (2) **the Redis semaphore's TTL, copied verbatim from `app/scheduler.py`'s 600s**, silently broke the pacing goal it was supposed to protect: `app/scheduler.py` releases a slot purely by TTL expiry and accepts the slack because its budget (3) is generous against an hours-long scan cadence; with outreach's budget of 2 and a 15s pacing goal, a slot reserved at claim time never freed until the full 600s elapsed regardless of how fast the scan actually finished, capping real throughput at 2 domains per 10 minutes — not the ~150-in-40-minutes this stage's whole gate depends on. Fixed by releasing each slot explicitly the instant its domain settles (`_release_capacity`), with the TTL cut down to a pure crash backstop just past the staleness-reclaim threshold rather than the primary release path. Live-verified end to end on real hostnames after both fixes: correct 2-concurrent/~15s-paced throughput; pausing mid-batch drained the two in-flight domains to `completed` while the tick fired repeatedly over the next 40+ seconds claiming nothing new; resuming continued from exactly where it left off with no domain re-scanned; a prospect never rolled up early while a domain remained `pending`, then correctly reached `analyzing` once every domain settled, including a real `completed_partial` outcome with an accurate module-error summary; and `/admin/funnel`'s reported anonymous-scan count matched the raw count minus exactly the outreach-linked scans for the same day window (141 raw − 10 outreach-linked = 131 reported), the specific before/after check this stage's own verification list asks for. Full suite (591 passed), `ruff`, `mypy` (75 files) clean. Step 5's endpoints, and the campaign-status-transition contract text's forward reference to them, are unchanged from v3.9 — this amendment is implementation only. |
+| 3.9 | 2026-09-17 | Outreach orchestrator, Stage 2 Step 1 contract amendment (`docs/OUTREACH STAGE 2.md` Step 1, full design in `docs/OUTREACH_BUILD_SPEC.md`). New §4 vars `OUTREACH_MAX_CONCURRENT_SCANS` (2), `OUTREACH_SCAN_DELAY_SECONDS` (15), `OUTREACH_MAX_SCAN_RETRIES` (2), `OUTREACH_RETRY_BACKOFF_SECONDS` (300) — mirrored into `app/config.py`'s `Settings` in the same edit, no code consuming them yet (Step 2). New §7.4 code `INVALID_CAMPAIGN_STATUS` (409, **CONTRACT GAP**, proposed) — not named by the stage prompt, needed because `.../scan`/`.../pause`/`.../resume` (§7.16, below) all have a wrong-current-status failure mode with nowhere else to hang a machine-readable code; mirrored into `app/errors.py`/`types/contract.ts` in the same edit, same "propose now" pattern as `WEBHOOK_INVALID_SIGNATURE` (v2.5). New §7.16: the four Stage 2 admin endpoints (`.../scan`, `.../pause`, `.../resume`, `.../scan-progress`), `OutreachScanProgress` fully specified inline (domain-state counts, in-flight, `started_at`, `estimated_completion_at`, last-20 recent outcomes, and Step 6's batch metrics folded into the same live payload rather than a second endpoint) — Pydantic/TS schemas themselves deferred to Step 5's implementation, matching the same restraint v3.6 applied to `OutreachImportReport`. Four gaps found and resolved before drafting, per the human's own "flag anything that looks wrong" ask: (1) **campaign-status transitions had no state-machine coverage** — Stage 1's `transition_*` trio never included campaigns, yet "make paused actually work" requires one; new `transition_campaign()` specified (`draft->running`, `running->paused`, `running->complete` [unused this stage], `paused->running`), built in Step 2. (2) **`.../scan` on a `paused` campaign needed a decision**: resolved to refuse (`409 INVALID_CAMPAIGN_STATUS`) rather than silently resume, on the reasoning that a generic start button doubling as an un-pause would make `paused` one click away from meaningless — the exact failure mode the v3.6 sign-off was about; `.../resume` is the one deliberate way back, and itself re-enqueues a worker pass rather than only flipping the flag, since the original pass already stopped claiming when it saw `paused`. (3) **Step 6's "measure the batch" had no endpoint** — the stage prompt's Step 5 endpoint list names three, and Step 6's metrics fit nowhere; resolved by folding them into `.../scan-progress` as an always-live `metrics` object rather than inventing a second endpoint over the same underlying data, consistent with Step 6's own "drift below 95%, I want to see it on the page" wording implying mid-batch visibility, not only a post-hoc report. (4) **"Retries" was ambiguous** — `OUTREACH_MAX_SCAN_RETRIES=2` could mean 2 or 3 total attempts; pinned to the literal English reading (2 retries *after* the first attempt, 3 total), with the exact `scan_attempts` boundary condition spelled out so Step 2/3 don't have to guess. `estimated_completion_at`'s formula (self-correcting from this campaign's own observed pace, null until one domain has settled) and the `completed_partial_by_module_error`/`failed_by_reason` aggregation methods (read through `parse_stored_scan()`, never raw JSONB) are stated explicitly for the same "never guess" reason. Also closes what v3.6 flagged and deferred: `/admin/funnel`'s prospect-scan exclusion gets a second `NOT EXISTS` against `outreach_domains.scan_id` once Step 2 starts populating it — implementation, not a JSON-contract change, verified in this stage's own gate. No implementation yet — the runner, retry/roll-up logic, and the four endpoints' handlers are Steps 2-5 of the stage prompt. |
+| 3.8 | 2026-09-17 | Outreach orchestrator, Stage 1 Step 5 implementation (`docs/outreach_stage_1.md` Step 5): the minimal admin surface. Implements the four endpoints §7.15 (v3.6) already specified, plus one addition beyond the stage prompt's literal list — `GET /api/v1/admin/outreach/campaigns/{campaign_id}` (§7.15, this entry) — needed because the review page has to show a campaign's own name/status and nothing else fetches one; same `GET .../{id}` precedent `AdminProspectBatchDetail` already set. Business logic in new `app/outreach/admin.py` (campaign CRUD/list with per-state counts, prospect list with domain counts, wraps `import_csv` from Step 3 into the `OutreachImportReport` Pydantic shape); wired into the existing `app/routers/admin.py` behind the existing `require_admin_token` dependency — no second auth path. New `app/schemas.py` shapes (`OutreachCampaignCreateRequest`, `OutreachCampaign`, `OutreachCampaignRow`, `OutreachProspectRow`, `OutreachRejectedRow`, `OutreachImportWarning`, `OutreachImportReport`), mirrored in `types/contract.ts` in the same edit per rule 4. New dependency `python-multipart` (the CSV upload route's first use of FastAPI's `UploadFile`) and a matching `ruff.toml` addition — `fastapi.File` joins `extend-immutable-calls` alongside `Depends`/`Query`/`Path`/`Body`, same B008 exemption reasoning. Frontend: `/admin/outreach` (campaign list + new-campaign form) and `/admin/outreach/[campaign_id]` (CSV upload form rendering the §17.5 report plainly, prospect list filterable by state via `ProspectStateFilter`), both under the existing `(dash)` layout's admin-token gate and `noindex` — no new contract needed for either, matching `/admin/prospects`'s existing precedent. `AdminShell`'s nav gains an "Outreach" link. Verified live in a browser, not just by test: created a campaign, imported a 3-row/2-agency/5-domain CSV, confirmed the exact counts rendered, re-imported the same file and confirmed the UI showed `0 agencies, 0 domains` imported / `2` skipped (idempotency, not just asserted in `pytest`), exercised the state filter, and confirmed a malformed CSV's `422 VALIDATION_ERROR` message renders inline rather than crashing the form. `app/admin/__init__.py`'s module docstring updated to name the outreach tables alongside prospect-scan batches as this surface's only writes. Full suite (563 passed), `ruff`, `mypy` (74 files), `pnpm lint`, `pnpm build` all clean. |
+| 3.7 | 2026-09-17 | Outreach orchestrator, Stage 1 Step 4 follow-up (`docs/outreach_stage_1.md` Step 4, human sign-off in-session): three schema/graph decisions on `outreach_messages`, folded in now while the table is still unused rather than deferred to a migration against live data. (1) New column `state_reason text` — same purpose as `outreach_prospects.state_reason`, ruled necessary rather than relying on the application log alone: Stage 4 produces failure classes (a Gmail API rejection, a PDF that wouldn't render, an attachment over Gmail's size limit) the review UI needs to show directly, not send an operator to grep logs for. Distinct from `reply_note` (v3.6, unchanged) — that records what a human said back, this records why the pipeline itself failed. (2) New column `state_changed_at timestamptz not null default now()`, written by every transition — one column, not one nullable timestamp per state (ruled out explicitly: "that's how you end up with eight nullable timestamps, most of them always empty"). `drafted_at`/`sent_at`/`replied_at` (v3.6) are unchanged and kept, since they're what §12 of the spec's reply-rate metrics actually measure; `DISCARDED` gets no dedicated timestamp of its own — `state_changed_at` covers it. (3) `OutreachMessageState`'s transition graph (§5.3 of the spec) gains one edge, `READY_FOR_REVIEW → DRAFTED` ("regenerate", spec §11 review UI) — the original diagram had no way back in, making the review UI's own "regenerate" action structurally impossible to express. `unique(prospect_id)` (v3.6) is unchanged and is exactly why regenerate updates the existing row rather than inserting a second one; `SENT` remains reachable only to `REPLIED` — regenerating a sent message would misrepresent what actually left the building. Two caller obligations recorded in §11 for whoever builds regenerate (spec Stage 4): delete the old Gmail draft via the API before creating the replacement, nulling `gmail_draft_id` as part of that same step so the column never transiently holds an id Gmail no longer has; and bump `template_variant` on every regenerate, on the reasoning that a message worth re-drafting probably read wrong the first time. `app/outreach/state_machine.py`'s `transition_message` (Step 4) nulls `gmail_draft_id` and bumps `template_variant` itself on entry to `DRAFTED` — the only edge that targets it, so it can only ever mean "regenerate" — but has no Gmail API access and cannot perform the deletion itself; that stays the caller's job. All three are internal-only, not part of the JSON contract — `outreach_messages` has no Pydantic schema yet (nothing serialises it to JSON until spec Stage 4/5's review UI), so `schemas.py`/`contract.ts` are untouched, matching the same "generated but not yet defined" restraint rule 9 already establishes elsewhere. New migration `0010`. |
+| 3.6 | 2026-09-17 | Outreach orchestrator, Stage 1 contract amendment (`docs/outreach_stage_1.md` Step 1, full design in `docs/OUTREACH_BUILD_SPEC.md`). Internal GTM tooling, not a product phase — new "Internal tooling" section added to `ROADMAP.md`, outside the phase sequence, listing this alongside the already-shipped admin dashboard, each with a one-line scope and its own spec pointer; also corrects `CLAUDE.md`'s stale "Phase 3 has not formally started" framing implicitly, since this work is explicitly *not* Phase 3. New §5 enums `OutreachProspectState`, `OutreachDomainState`, `OutreachMessageState` (spec §5, closed sets, lower_snake_case matching this table's convention) and `OutreachCampaignStatus` (**CONTRACT GAP**, proposed and signed off in-session — `outreach_campaigns.status` needs a closed set the spec's own enum list didn't separately name; same pattern as `InvoiceState`/`DigestMode`). Human sign-off also names a behavioural requirement for Step 4, not a schema change: `paused` must actually block new domain-scan enqueues and new draft creation for that campaign — a status with no enforcement is worse than none, since it gets reached for mid-incident. Recorded here now so Step 4 doesn't have to rediscover it. New §4 var `OUTREACH_MAX_IMPORT_ROWS` (default `500`). New §11 tables `outreach_campaigns`, `outreach_prospects`, `outreach_domains`, `outreach_messages`, `outreach_suppressions` — no `outreach_findings` table, findings stay referenced (`hook_scan_id` + `hook_finding_code`) not copied, same rule `scans.result` already establishes. New §7.15: the four Stage 1 admin endpoints (campaign create/list, CSV import, prospect list), `OutreachCampaign`/`OutreachCampaignRow`/`OutreachProspectRow`/`OutreachImportReport` defined inline per the `MembershipWithEmail` precedent, and a documented file-level-vs-row-level split for import failures (`422 VALIDATION_ERROR` for a malformed file, a `200` report with `rejected_rows`/`warnings` for individual bad rows) that the spec itself left implicit. §7.13's read-only-rule sentence narrowed to "within this section" and cross-referenced to §7.15, rather than silently going stale now that the admin surface has a second set of non-GET routes. Investigated and resolved before drafting, per the human's explicit ask to check facts first: `/admin/prospects` (§7.13, v2.8) turned out to be fully built — API and page both — contrary to the working assumption that its UI was never shipped; `SELECT count(*)` on both `prospect_batches` and `prospect_scans` returned `0` against the live database. Resolution, documented in §7.15 and §11: both tables stay, unused count notwithstanding — `prospect_batches`/`prospect_scans` remains the ad-hoc no-agency batch scanner, `outreach_*` is the new structured per-agency pipeline, and they coexist rather than one replacing the other. `/admin/funnel`'s prospect-scan exclusion (currently `NOT EXISTS` against `prospect_scans.scan_id` only, §7.13) needs extending to also check `outreach_domains.scan_id` once Stage 2 starts populating it — flagged in §7.15 rather than fixed now, since Stage 1 never populates that column and the exclusion holds trivially until then. Delete-behaviour decision on `outreach_domains.scan_id`/`outreach_messages.hook_scan_id`, made and documented in §11 rather than following the stage prompt's suggested fallback literally: left at the default `RESTRICT` (not `SET NULL`) — the scenario the prompt worried about ("deleting a scan would block deleting a prospect") doesn't actually arise, since a prospect delete cascades its own `outreach_domains`/`outreach_messages` directly and never needs to delete the referenced `scans` row; confirmed this isn't a third `scans`↔`monitored_hostnames`-style FK cycle, since the reference here is one-directional. `outreach_messages` is schema-only in this amendment, unused until Stage 4 (templates/PDF/Gmail draft) — noted in both §7.15 and inline in §11 so a later session doesn't read the empty table as a miss. No implementation yet — models, migration, CSV import, and the state-machine module are Steps 2-4 of `docs/outreach_stage_1.md`. |
 | 3.5 | 2026-09-14 | Scan-corruption fix and safeguard (`docs/urgent_scan_corruption.md`, Finding 4): a crash in `evaluate_and_fire_alerts`, reading a pre-v3.0 stored `scans.result` row (missing `is_complete`/`incomplete_modules`/`grade_cap_reason`) straight into `Scan.model_validate`, reached `run_scan`'s outer handler *after* the new scan had already committed as `completed` — overwriting a real grade back to `failed` and, once a monitor's retry streak exhausted, firing a false `scan_failure` alert. Confirmed live: 20 corrupted scans and 5 false alerts sent over ~17 hours before the fix landed, all to monitors on two orgs; deleted after a verified backup and a reviewed dry run, per the incident doc's own Step 3 (no contract-surface change from that repair — the rows are gone, not reshaped). Fixed two ways, neither a contract-surface change on its own: (1) `app/scanner/orchestrator.py` isolates every post-commit side effect (alert evaluation, monitor bookkeeping) in its own try/except that logs and moves on, so a failure there can never reach `_mark_failed` and undo an already-successful scan; (2) new `app/scan_compat.py` parses a stored `scan.result` tolerantly regardless of which contract version wrote it (documented defaults for genuinely-missing fields, e.g. `is_complete: true` for a pre-v3.0 row — those scans had no concept of partial completion and were only ever stored on success), used at every read of `scans.result` instead of validating directly against the current schema. New §7.13 field `AdminHealthReport.anomalous_failed_scans_24h` — the one contract-surface change here — is the live canary: `COUNT(*)` over `scans` in the last 24h where `status = 'failed'` and `overall_grade IS NOT NULL`, a shape only reachable by exactly this bug (or another with the same shape) recurring, since `_mark_failed` never sets a grade through any normal path. Should always be `0`; the frontend renders it in red, same treatment as `monitors_overdue_1h`, whenever it isn't. `types/contract.ts` mirrors the field in the same edit. Also discovered, not yet fixed, flagged here rather than silently left: `_mark_failed` calls `increment_daily_stat(..., "scans_failed", ...)` on top of the `scans_completed` increment the original success already recorded, so `daily_stats` double-counted these 20 scans in both buckets for 2026-09-13/14 — a separate table from anything this amendment touches. |
 | 2.7 | 2026-08-18 | Phase 2 Step 8 implementation: waitlist migration (`docs/PHASE_2_PROMPT.md` Step 8). **No contract-surface change** — the phase prompt specifies a one-off internal command, not an endpoint, so nothing here touches `schemas.py`/`contract.ts`. New `app/commands/migrate_waitlist.py`, run manually (`python -m app.commands.migrate_waitlist`), reads every `waitlist_signups` row (Gate B, §1.3) and, per signup, find-or-creates the user, creates a personal free-plan org (or reuses the existing one if the email already has a real account — the phase prompt's literal "creates the user, creates a personal org" reads as the common case, a brand-new email; an email that already has an account can't get a second one, since `users.email` is unique), adds the hostname as a monitor scoped to that org (§7.2/§10, unchanged), and adds the signup email as a monitor-scoped `AlertRecipient`, then sends the one plain-text email the phase prompt specifies, linking to `/app`. Idempotent — a rerun's `create_monitor` call hits `DUPLICATE_HOSTNAME` for a signup already migrated and skips it without resending. Two existing functions were made reusable rather than duplicated for this, matching every other step's "no parallel path" convention: `app/otp.py`'s private `_find_or_create_user`/`_create_personal_org` are now public `find_or_create_user`/`create_personal_org` (the latter now returns the created org), plus a new `primary_org_for_user` (the same "earliest-joined membership" lookup `deps.py`'s `CurrentOrgContext` already does at request time); and `routers/alerts.py`'s inline idempotent-insert logic for `POST /alerts/recipients` was extracted into `app/alerts.py`'s `get_or_create_recipient`, called by both the router and the new command. Internal-only addition, not part of the JSON contract: none — no schema changed, no table added. |
+| 3.11 | 2026-09-18 | Outreach orchestrator, Stage 2 Steps 5-6 implementation (`docs/OUTREACH STAGE 2.md` Steps 5-6, human sign-off on the three carry-through items below). Implements the four `§7.16` endpoints (v3.9) exactly as specified — `POST .../scan` (`app/outreach/admin.py`'s `start_scan`: `draft->running` via `transition_campaign`, or a no-op status-wise on an already-`running` campaign, always re-applying `include_weak`; `409 INVALID_CAMPAIGN_STATUS` on `paused`/`complete`), `POST .../pause` (`running->paused` only), `POST .../resume` (`paused->running` only), and `GET .../scan-progress` (`app/outreach/progress.py`'s new `build_scan_progress`, wired straight to `get_scan_progress`) — plus the `OutreachRecentOutcome`/`OutreachScanMetrics`/`OutreachScanProgress` Pydantic schemas §7.16 left to this step, mirrored in `types/contract.ts` in the same edit. `_build_metrics` computes `clean_rate`/`completed_partial_by_module_error`/`failed_by_reason` by reading each domain's scan through `parse_stored_scan()` (never raw JSONB, per §7.16's own note) and `median_scan_duration_ms`/`p95_scan_duration_ms` via a linear-interpolation percentile over `scans.duration_ms`. Three items carried through from the human's Step 1 sign-off, none of them new decisions — restated here since this is the step that actually implements them: (1) **`estimated_completion_at` honesty threshold** — `MIN_SETTLED_FOR_ESTIMATE = 10`, exactly as v3.9's formula already specified; `build_scan_progress` holds it `null` below that sample size and once `remaining == 0`, regardless of how long the campaign has been running. (2) **Worker-rebuild hazard surfaced outside the contract** — `CLAUDE.md`'s Commands section now states `docker compose build worker` is required after any worker-relevant edit, not just a restart, closing the gap v3.10 flagged as "a standing workflow gap, not fixed at the infrastructure level in this amendment"; no contract-surface change, since `CLAUDE.md` isn't part of the JSON contract. (3) **The batch made watchable** — new `ScanProgressPanel.tsx` on `/admin/outreach/[campaign_id]`, polling `.../scan-progress` every 4 seconds: Start/Pause/Resume buttons gated by `campaign_status` exactly as §7.16 specifies (no button offers an illegal transition), the six-state domain count grid, in-flight/started/estimated-completion/wall-time stats, the full metrics block, and the last-20 recent-outcomes list with outcome-coloured badges. Live-verified in a browser end to end, not just by test, including the one check the human asked to be run by hand rather than read: with a batch actively holding both `OUTREACH_MAX_CONCURRENT_SCANS` slots (confirmed via the admin page showing `in_flight: 2` at the exact moment of submission), a public scan of `stackoverflow.com` was submitted from a separate tab and completed normally — a full graded report rendered in a few seconds, not queued behind the batch — confirming `outreach:inflight`'s Redis semaphore (budget 2) and the public scan path share no capacity and cannot starve one another. Also verified live: pausing mid-batch drained the two in-flight domains to `completed` while `PENDING` held flat under 10+ seconds of continued polling, and resume continued claiming from exactly where it left off. Full suite (617 passed, 46 deselected — up from 591 at v3.10, the deselected set being the pre-existing network-dependent tests excluded from the default run since Gate A follow-up A3 — 15 new tests in `tests/test_outreach_progress.py`, the rest in `tests/test_outreach_admin_router.py`), `ruff`, `mypy` (76 files), `pnpm lint`, `pnpm build` all clean. |

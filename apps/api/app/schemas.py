@@ -30,6 +30,9 @@ from app.enums import (
     ModuleName,
     ModuleStatus,
     MonitorState,
+    OutreachCampaignStatus,
+    OutreachDomainState,
+    OutreachProspectState,
     PlanCode,
     ReadinessVerdict,
     ScanStatus,
@@ -999,3 +1002,110 @@ class AdminProspectBatchRow(ContractModel):
 
 class AdminProspectBatchDetail(AdminProspectBatchRow):
     items: list[AdminProspectItem]
+
+
+# --- §7.15 Outreach orchestrator, Stage 1 admin surface (v3.6) ---
+
+
+class OutreachCampaignCreateRequest(ContractModel):
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("A name is required.")
+        return value
+
+
+class OutreachCampaign(ContractModel):
+    campaign_id: str
+    name: str
+    status: OutreachCampaignStatus
+    created_at: UtcDatetime
+
+
+class OutreachCampaignRow(OutreachCampaign):
+    """`GET /admin/outreach/campaigns` row. `state_counts` always carries
+    every `OutreachProspectState` key, `0` rather than omitted, so a
+    missing key never reads as "unknown" (contract rule 7)."""
+
+    prospect_count: int
+    state_counts: dict[OutreachProspectState, int]
+
+
+class OutreachProspectRow(ContractModel):
+    """`GET /admin/outreach/campaigns/{campaign_id}/prospects` row — the
+    bare list Stage 1 asks for, not the Stage 5 review UI (hook reasoning,
+    editable draft, attachments)."""
+
+    prospect_id: str
+    agency_name: str
+    contact_name: str | None
+    contact_email: str
+    state: OutreachProspectState
+    state_reason: str | None
+    domain_count: int
+    created_at: UtcDatetime
+
+
+class OutreachRejectedRow(ContractModel):
+    row_number: int
+    reason: str
+
+
+class OutreachImportWarning(ContractModel):
+    contact_email: str
+    message: str
+
+
+class OutreachImportReport(ContractModel):
+    """§17.5. Nothing imports silently — every count and every rejected or
+    suppressed row is accounted for here."""
+
+    imported_agencies: int
+    imported_domains: int
+    skipped_agencies: int
+    suppressed_agencies: int
+    rejected_rows: list[OutreachRejectedRow]
+    warnings: list[OutreachImportWarning]
+
+
+# --- §7.16 Outreach orchestrator, Stage 2 admin surface (v3.9/v3.10) ---
+
+
+class OutreachRecentOutcome(ContractModel):
+    domain_id: str
+    hostname: str
+    prospect_id: str
+    agency_name: str
+    state: OutreachDomainState  # always one of completed|completed_partial|failed
+    scan_error: str | None
+    settled_at: UtcDatetime
+
+
+class OutreachScanMetrics(ContractModel):
+    """Step 6, folded into the same live payload as the rest of
+    `OutreachScanProgress` rather than a second endpoint — see §7.16."""
+
+    clean_rate: float | None  # COMPLETED / total domains; null only when the campaign has none
+    completed_partial_count: int
+    completed_partial_by_module_error: dict[str, int]  # ModuleErrorCode keys actually present only
+    failed_count: int
+    failed_by_reason: dict[str, int]  # grouped by the exact scan_error string
+    median_scan_duration_ms: int | None
+    p95_scan_duration_ms: int | None
+    retried_and_rescued_count: int
+    total_wall_time_ms: int | None
+
+
+class OutreachScanProgress(ContractModel):
+    campaign_id: str
+    campaign_status: OutreachCampaignStatus
+    domain_state_counts: dict[OutreachDomainState, int]  # every key always present, 0 not omitted
+    in_flight: int
+    started_at: UtcDatetime | None
+    estimated_completion_at: UtcDatetime | None
+    recent_outcomes: list[OutreachRecentOutcome]
+    metrics: OutreachScanMetrics

@@ -192,3 +192,58 @@ class AccountHealth(StrEnum):
     STALLED = "stalled"
     AT_RISK = "at_risk"
     DORMANT = "dormant"
+
+
+# --- Outreach orchestrator additions (contract v3.6) ---
+# §7.15, internal admin surface only — never in a customer-facing response.
+
+
+class OutreachCampaignStatus(StrEnum):
+    """CONTRACT GAP, proposed and signed off in-session: not named by
+    docs/OUTREACH_BUILD_SPEC.md's own enum list, but §4.1's
+    outreach_campaigns.status column needs a closed set. Same pattern as
+    InvoiceState/DigestMode. PAUSED must have real teeth in the state
+    machine (Step 4): blocks new domain scans being enqueued and new
+    drafts being created for that campaign — not a cosmetic label."""
+
+    DRAFT = "draft"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETE = "complete"
+
+
+class OutreachProspectState(StrEnum):
+    """Spec §5.1. One row per agency (grouped by contact_email at import)."""
+
+    PENDING = "pending"
+    SCANNING = "scanning"
+    ANALYZING = "analyzing"
+    SUPPRESSED = "suppressed"
+    DRAFTING = "drafting"
+    READY_FOR_REVIEW = "ready_for_review"
+    SENT = "sent"
+    REPLIED = "replied"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class OutreachDomainState(StrEnum):
+    """Spec §5.2. One row per client domain."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    COMPLETED_PARTIAL = "completed_partial"
+    RETRYING = "retrying"
+    FAILED = "failed"
+
+
+class OutreachMessageState(StrEnum):
+    """Spec §5.3. One row per prospect (unique on prospect_id, §11) —
+    unused until Stage 4 (templates/PDF/Gmail draft creation)."""
+
+    DRAFTED = "drafted"
+    READY_FOR_REVIEW = "ready_for_review"
+    SENT = "sent"
+    REPLIED = "replied"
+    DISCARDED = "discarded"

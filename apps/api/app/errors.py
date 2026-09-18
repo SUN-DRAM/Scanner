@@ -56,6 +56,11 @@ class ErrorCode(StrEnum):
     # grade, no findings, no modules — a PDF of it would be an empty
     # document with our logo on it, which is worse than no document.
     REPORT_NOT_AVAILABLE = "REPORT_NOT_AVAILABLE"
+    # Outreach orchestrator Stage 2 (§7.16, v3.9). CONTRACT GAP — not named
+    # by the stage prompt: POST .../scan, .../pause, .../resume all have a
+    # wrong-current-status failure mode (e.g. .../pause on a campaign that
+    # isn't running) with nowhere else to hang a machine-readable code.
+    INVALID_CAMPAIGN_STATUS = "INVALID_CAMPAIGN_STATUS"
 
 
 ERROR_CODE_HTTP_STATUS: dict[ErrorCode, int] = {
@@ -79,6 +84,7 @@ ERROR_CODE_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.NOT_FOUND: status.HTTP_404_NOT_FOUND,
     ErrorCode.WEBHOOK_INVALID_SIGNATURE: status.HTTP_400_BAD_REQUEST,
     ErrorCode.REPORT_NOT_AVAILABLE: status.HTTP_409_CONFLICT,
+    ErrorCode.INVALID_CAMPAIGN_STATUS: status.HTTP_409_CONFLICT,
 }
 
 

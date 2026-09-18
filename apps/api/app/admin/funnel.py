@@ -4,7 +4,15 @@ path over the last 30 days, since that is what cold outreach feeds.
 Documented approximations (every value is still a real query, contract
 rule 7): a scan counts as **logged-in** when `scans.monitor_id` is non-null
 (it ran on behalf of an account's monitor), **anonymous** otherwise.
-Prospect scans (§11) are excluded via `NOT EXISTS` against `prospect_scans`.
+Prospect scans (§11) are excluded via `NOT EXISTS` against
+`prospect_scans` **and**, since the outreach orchestrator Stage 2 (v3.9)
+started populating it, `outreach_domains.scan_id` — two separate prospect-
+scan producers, both excluded, neither replacing the other (§7.15's own
+boundary note). Flagged as a forward TODO at v3.6, closed here now that
+Stage 2 actually links a `scans` row to an `outreach_domains` row for the
+first time; before this fix, an outreach batch's scans would have quietly
+inflated the anonymous-scan count exactly like a real acquisition-funnel
+signal, weeks before anyone thought to check why scan volume had jumped.
 Activation / paid rates are windowed org counts.
 """
 
@@ -20,6 +28,7 @@ from app.enums import SubscriptionState
 from app.models import (
     MonitoredHostnameRecord,
     OrganisationRecord,
+    OutreachDomainRecord,
     ProspectScanRecord,
     ScanRecord,
     SubscriptionRecord,
@@ -59,6 +68,14 @@ async def build_funnel_report(session: AsyncSession) -> AdminFunnelReport:
         .where(ProspectScanRecord.scan_id == ScanRecord.scan_id)
         .exists()
     )
+    # v3.9: the outreach orchestrator's own prospect-scan producer, excluded
+    # alongside (not instead of) prospect_scans above — see this module's
+    # docstring.
+    is_outreach_scan = (
+        select(OutreachDomainRecord.domain_id)
+        .where(OutreachDomainRecord.scan_id == ScanRecord.scan_id)
+        .exists()
+    )
     scan_mappings = (
         (
             await session.execute(
@@ -69,7 +86,11 @@ async def build_funnel_report(session: AsyncSession) -> AdminFunnelReport:
                     func.count().filter(ScanRecord.monitor_id.is_not(None)).label("logged_in"),
                     func.count(distinct(ScanRecord.hostname)).label("unique_hostnames"),
                 )
-                .where(ScanRecord.created_at >= window_start, ~is_prospect_scan)
+                .where(
+                    ScanRecord.created_at >= window_start,
+                    ~is_prospect_scan,
+                    ~is_outreach_scan,
+                )
                 .group_by(scan_day)
             )
         )

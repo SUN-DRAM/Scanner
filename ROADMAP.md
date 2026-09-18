@@ -126,6 +126,19 @@ Phase 3 needs Phase 2's account model. Phase 5 needs Phase 2's tenancy. Phase 6 
 
 ---
 
+## Internal tooling
+
+Outside the phase sequence above. Nothing here ships to a customer, none of it gates a phase, and it never appears on a customer-facing surface. Listed here precisely so its absence doesn't read as unscoped work — each item still needs its own spec and its own contract amendment before code.
+
+| Tool | Status | Scope | Spec |
+|---|---|---|---|
+| Admin dashboard | Shipped, v2.8 | Read-mostly, single-operator console: account/health/funnel visibility, ad-hoc "paste hostnames, no agency" batch scanning (`prospect_batches`/`prospect_scans`) | `docs/Admin dashboard prompt.md`, `CONTRACT.md` §7.13 |
+| Outreach orchestrator | In progress | Structured per-agency cold-outreach pipeline: CSV import → paced batch scan → deterministic hook selection → Gmail draft assembly → human review and send. No security logic of its own; calls the scan engine directly | `docs/OUTREACH_BUILD_SPEC.md`, `docs/outreach_stage_1.md`, `CONTRACT.md` §7.15 |
+
+Admin-only, behind `ADMIN_TOKEN`. If a tool here ever needs to be customer-visible, it graduates into the phase sequence with its own phase prompt — it doesn't grow a customer surface in place.
+
+---
+
 ## How to run each phase
 
 1. Open a **new chat** for the phase.

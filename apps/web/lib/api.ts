@@ -34,6 +34,13 @@ import type {
   Organisation,
   OrgUpdateRequest,
   OtpVerifyRequest,
+  OutreachCampaign,
+  OutreachCampaignCreateRequest,
+  OutreachCampaignRow,
+  OutreachImportReport,
+  OutreachProspectRow,
+  OutreachProspectState,
+  OutreachScanProgress,
   PaginatedList,
   PlanCode,
   Scan,
@@ -541,6 +548,128 @@ export async function fetchAdminProspectCsv(
     body: await response.text(),
     contentDisposition: response.headers.get("content-disposition"),
   };
+}
+
+// --- §7.15 Outreach orchestrator, Stage 1 admin surface (v3.6) ---
+
+export function createOutreachCampaign(
+  name: string,
+  adminToken: string,
+): Promise<OutreachCampaign> {
+  const request: OutreachCampaignCreateRequest = { name };
+  return apiFetch<OutreachCampaign>(
+    "/api/v1/admin/outreach/campaigns",
+    { method: "POST", body: JSON.stringify(request) },
+    { adminToken },
+  );
+}
+
+export function listOutreachCampaigns(
+  params: PageParams,
+  adminToken: string,
+): Promise<PaginatedList<OutreachCampaignRow>> {
+  return apiFetch<PaginatedList<OutreachCampaignRow>>(
+    `/api/v1/admin/outreach/campaigns${queryString(params)}`,
+    undefined,
+    { adminToken },
+  );
+}
+
+export function getOutreachCampaign(
+  campaignId: string,
+  adminToken: string,
+): Promise<OutreachCampaignRow> {
+  return apiFetch<OutreachCampaignRow>(
+    `/api/v1/admin/outreach/campaigns/${encodeURIComponent(campaignId)}`,
+    undefined,
+    { adminToken },
+  );
+}
+
+export interface OutreachProspectListParams extends PageParams {
+  state?: OutreachProspectState;
+}
+
+export function listOutreachProspects(
+  campaignId: string,
+  params: OutreachProspectListParams,
+  adminToken: string,
+): Promise<PaginatedList<OutreachProspectRow>> {
+  return apiFetch<PaginatedList<OutreachProspectRow>>(
+    `/api/v1/admin/outreach/campaigns/${encodeURIComponent(campaignId)}/prospects${queryString(params)}`,
+    undefined,
+    { adminToken },
+  );
+}
+
+/** Raw fetch, not `apiFetch` — a multipart body needs the browser's own
+ * `Content-Type: multipart/form-data; boundary=...` header, which
+ * `apiFetch`'s hardcoded `application/json` would silently override. */
+export async function importOutreachCampaignCsv(
+  campaignId: string,
+  file: File,
+  adminToken: string,
+): Promise<OutreachImportReport> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const response = await fetch(
+    `${API_BASE_URL}/api/v1/admin/outreach/campaigns/${encodeURIComponent(campaignId)}/import`,
+    { method: "POST", headers: { "X-Admin-Token": adminToken }, body: formData, cache: "no-store" },
+  );
+  if (!response.ok) {
+    const envelope = (await response.json()) as ErrorEnvelope;
+    throw new ApiRequestError(response.status, envelope);
+  }
+  return (await response.json()) as OutreachImportReport;
+}
+
+// --- §7.16 Outreach orchestrator, Stage 2 batch control (v3.9/v3.10) ---
+
+export function startOutreachScan(
+  campaignId: string,
+  includeWeak: boolean,
+  adminToken: string,
+): Promise<OutreachCampaignRow> {
+  return apiFetch<OutreachCampaignRow>(
+    `/api/v1/admin/outreach/campaigns/${encodeURIComponent(campaignId)}/scan${queryString({
+      include_weak: includeWeak ? "true" : undefined,
+    })}`,
+    { method: "POST" },
+    { adminToken },
+  );
+}
+
+export function pauseOutreachScan(
+  campaignId: string,
+  adminToken: string,
+): Promise<OutreachCampaignRow> {
+  return apiFetch<OutreachCampaignRow>(
+    `/api/v1/admin/outreach/campaigns/${encodeURIComponent(campaignId)}/pause`,
+    { method: "POST" },
+    { adminToken },
+  );
+}
+
+export function resumeOutreachScan(
+  campaignId: string,
+  adminToken: string,
+): Promise<OutreachCampaignRow> {
+  return apiFetch<OutreachCampaignRow>(
+    `/api/v1/admin/outreach/campaigns/${encodeURIComponent(campaignId)}/resume`,
+    { method: "POST" },
+    { adminToken },
+  );
+}
+
+export function getOutreachScanProgress(
+  campaignId: string,
+  adminToken: string,
+): Promise<OutreachScanProgress> {
+  return apiFetch<OutreachScanProgress>(
+    `/api/v1/admin/outreach/campaigns/${encodeURIComponent(campaignId)}/scan-progress`,
+    undefined,
+    { adminToken },
+  );
 }
 
 /** Mirrors `apps/api/app/routers/health.py`'s `HealthResponse` — an ad hoc

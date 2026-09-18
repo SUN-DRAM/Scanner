@@ -23,6 +23,7 @@ from app.db import get_sessionmaker
 from app.logging_config import configure_logging
 from app.notify.email import get_email_sender
 from app.observability import init_sentry
+from app.outreach.scanner import outreach_scan_tick
 from app.scanner.orchestrator import run_scan
 from app.scheduler import run_scheduler_tick
 
@@ -31,6 +32,12 @@ configure_logging(_settings)
 init_sentry(_settings)
 
 _EVERY_FIVE_MINUTES = set(range(0, 60, 5))
+# §7.16, v3.9: outreach batch scanning's own pacing tick. Computed from
+# OUTREACH_SCAN_DELAY_SECONDS at import time (same pattern as job_timeout
+# below reading scan_timeout_seconds) — arq's cron only schedules at
+# whole-second marks within a minute, so a delay that doesn't evenly
+# divide 60 just gets an uneven final gap, not an error.
+_OUTREACH_TICK_SECONDS = set(range(0, 60, max(1, _settings.outreach_scan_delay_seconds)))
 
 
 async def run_scan_job(_ctx: dict[str, Any], scan_id: str) -> None:
@@ -89,7 +96,18 @@ class WorkerSettings:
     _billing_cron_job = cron(expire_subscriptions_tick, minute=_EVERY_FIVE_MINUTES)  # type: ignore[arg-type]
     # §7.13: once a day, 02:30 UTC = 08:00 Asia/Kolkata.
     _digest_cron_job = cron(admin_digest_tick, hour={2}, minute={30})  # type: ignore[arg-type]
-    cron_jobs = [_scheduler_cron_job, _alerts_cron_job, _billing_cron_job, _digest_cron_job]
+    # §7.16, v3.9: claims eligible outreach domains up to the Redis
+    # semaphore's available capacity and settles any RUNNING ones whose
+    # scan has since finished — app/outreach/scanner.py's own module
+    # docstring explains why this is a tick rather than one long job.
+    _outreach_cron_job = cron(outreach_scan_tick, second=_OUTREACH_TICK_SECONDS)
+    cron_jobs = [
+        _scheduler_cron_job,
+        _alerts_cron_job,
+        _billing_cron_job,
+        _digest_cron_job,
+        _outreach_cron_job,
+    ]
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     # Comfortably above SCAN_TIMEOUT_SECONDS so the orchestrator's own
     # whole-scan budget (§10 rule 5) is always what actually cuts a stuck

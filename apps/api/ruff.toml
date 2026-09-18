@@ -25,8 +25,15 @@ known-first-party = ["app"]
 # FastAPI's dependency-injection style requires `Depends(...)` as an
 # argument default — that is the framework's documented pattern (see every
 # router in apps/api/app/routers/), not the mutable-default-argument bug
-# B008 exists to catch.
-extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Body"]
+# B008 exists to catch. `File` joins the list with the outreach CSV upload
+# endpoint (§7.15, v3.6) — the first file-upload route in this app.
+extend-immutable-calls = [
+  "fastapi.Depends",
+  "fastapi.Query",
+  "fastapi.Path",
+  "fastapi.Body",
+  "fastapi.File",
+]
 
 [format]
 quote-style = "double"

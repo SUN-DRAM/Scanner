@@ -97,6 +97,30 @@ class Settings(BaseSettings):
     # is what keeps the export path from starving the scanner, the same
     # priority rule the scheduler already follows (§7.9).
     pdf_max_concurrent: int = Field(default=2, alias="PDF_MAX_CONCURRENT")
+    # Outreach orchestrator Stage 1 (§7.15/§17, v3.6). CSV import
+    # (app/outreach/importer.py) hard-rejects a file with more data rows
+    # than this before any row is processed — "keep a mistake small," not a
+    # silent truncation.
+    outreach_max_import_rows: int = Field(default=500, alias="OUTREACH_MAX_IMPORT_ROWS")
+    # Outreach orchestrator Stage 2 (§7.16, v3.9). No code consumes these
+    # yet — the batch scan runner (Step 2) is not built in this amendment.
+    # Redis-semaphore cap on concurrent outreach batch scans, its own
+    # budget separate from and smaller than SCHEDULER_MAX_CONCURRENT_SCANS
+    # (3) and the worker's max_jobs, so a running batch structurally cannot
+    # starve public or scheduled scans.
+    outreach_max_concurrent_scans: int = Field(default=2, alias="OUTREACH_MAX_CONCURRENT_SCANS")
+    # Sequential pacing between outreach batch scans — the measured
+    # 98%-clean-scan-rate traffic profile, not a scanner limitation.
+    outreach_scan_delay_seconds: int = Field(default=15, alias="OUTREACH_SCAN_DELAY_SECONDS")
+    # Retry attempts *after* the first for a domain scan failure — 1 + this
+    # many total attempts before a domain becomes FAILED (§7.16's own note
+    # on why this boundary is spelled out explicitly).
+    outreach_max_scan_retries: int = Field(default=2, alias="OUTREACH_MAX_SCAN_RETRIES")
+    # Delay before a COMPLETED_PARTIAL domain's one re-scan, and before a
+    # RETRYING domain's next attempt.
+    outreach_retry_backoff_seconds: int = Field(
+        default=300, alias="OUTREACH_RETRY_BACKOFF_SECONDS"
+    )
 
     @field_validator("cors_origins")
     @classmethod

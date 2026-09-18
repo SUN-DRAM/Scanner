@@ -52,16 +52,19 @@ ALL_ERROR_CODES: tuple[ErrorCode, ...] = (
     ErrorCode.WEBHOOK_INVALID_SIGNATURE,
     # --- PDF report export addition (contract v2.9/§7.14) ---
     ErrorCode.REPORT_NOT_AVAILABLE,
+    # --- Outreach orchestrator Stage 2 addition (contract v3.9/§7.16) ---
+    ErrorCode.INVALID_CAMPAIGN_STATUS,
 )
 
 
 def test_all_error_codes_constant_matches_the_closed_set() -> None:
-    # Contract §7.4's table has exactly these 19 rows (8 from Phase 1, 10
-    # added in Phase 2, 1 from the v2.9 PDF export amendment) — if a code is
-    # ever added or removed there, this constant (and the parametrized test
-    # below) must be updated in the same session.
+    # Contract §7.4's table has exactly these 20 rows (8 from Phase 1, 10
+    # added in Phase 2, 1 from the v2.9 PDF export amendment, 1 from the
+    # v3.9 outreach Stage 2 amendment) — if a code is ever added or removed
+    # there, this constant (and the parametrized test below) must be
+    # updated in the same session.
     assert set(ALL_ERROR_CODES) == set(ErrorCode)
-    assert len(ALL_ERROR_CODES) == 19
+    assert len(ALL_ERROR_CODES) == 20
 
 
 @pytest.mark.parametrize("code", ALL_ERROR_CODES)

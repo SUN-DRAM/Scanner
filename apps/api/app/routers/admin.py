@@ -13,7 +13,7 @@ from datetime import date
 from typing import Literal
 
 from arq import ArqRedis
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, File, Query, Response, UploadFile, status
 from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,8 +31,19 @@ from app.admin.prospects import (
 )
 from app.config import get_settings
 from app.db import get_session
-from app.enums import AccountHealth, PlanCode
+from app.enums import AccountHealth, OutreachProspectState, PlanCode
 from app.models import DailyStatsRecord, ScanRecord
+from app.outreach.admin import (
+    create_campaign,
+    get_campaign,
+    get_scan_progress,
+    import_campaign_csv,
+    list_campaigns,
+    list_prospects,
+    pause_scan,
+    resume_scan,
+    start_scan,
+)
 from app.redis_client import get_arq_pool, get_redis_client
 from app.schemas import (
     AdminAccountDetail,
@@ -41,6 +52,12 @@ from app.schemas import (
     AdminHealthReport,
     AdminProspectBatchDetail,
     AdminProspectBatchRow,
+    OutreachCampaign,
+    OutreachCampaignCreateRequest,
+    OutreachCampaignRow,
+    OutreachImportReport,
+    OutreachProspectRow,
+    OutreachScanProgress,
     PaginatedList,
     ProspectBatchCreateRequest,
 )
@@ -234,3 +251,127 @@ async def admin_prospect_batch_export(
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# --- §7.15 Outreach orchestrator, Stage 1 (v3.6) ---
+
+
+@router.post(
+    "/admin/outreach/campaigns",
+    response_model=OutreachCampaign,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_admin_token)],
+)
+async def admin_create_outreach_campaign(
+    payload: OutreachCampaignCreateRequest,
+    session: AsyncSession = Depends(get_session),
+) -> OutreachCampaign:
+    return await create_campaign(session, name=payload.name)
+
+
+@router.get(
+    "/admin/outreach/campaigns",
+    response_model=PaginatedList[OutreachCampaignRow],
+    dependencies=[Depends(require_admin_token)],
+)
+async def admin_list_outreach_campaigns(
+    session: AsyncSession = Depends(get_session),
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=25, ge=1, le=_ADMIN_MAX_PER_PAGE),
+) -> PaginatedList[OutreachCampaignRow]:
+    return await list_campaigns(session, page=page, per_page=per_page)
+
+
+@router.get(
+    "/admin/outreach/campaigns/{campaign_id}",
+    response_model=OutreachCampaignRow,
+    dependencies=[Depends(require_admin_token)],
+)
+async def admin_get_outreach_campaign(
+    campaign_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> OutreachCampaignRow:
+    return await get_campaign(session, campaign_id)
+
+
+@router.post(
+    "/admin/outreach/campaigns/{campaign_id}/import",
+    response_model=OutreachImportReport,
+    dependencies=[Depends(require_admin_token)],
+)
+async def admin_import_outreach_campaign_csv(
+    campaign_id: str,
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(get_session),
+) -> OutreachImportReport:
+    csv_bytes = await file.read()
+    return await import_campaign_csv(session, campaign_id, csv_bytes)
+
+
+@router.get(
+    "/admin/outreach/campaigns/{campaign_id}/prospects",
+    response_model=PaginatedList[OutreachProspectRow],
+    dependencies=[Depends(require_admin_token)],
+)
+async def admin_list_outreach_prospects(
+    campaign_id: str,
+    session: AsyncSession = Depends(get_session),
+    state: OutreachProspectState | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=25, ge=1, le=_ADMIN_MAX_PER_PAGE),
+) -> PaginatedList[OutreachProspectRow]:
+    return await list_prospects(session, campaign_id, state=state, page=page, per_page=per_page)
+
+
+# --- §7.16 Outreach orchestrator, Stage 2 batch control (v3.9/v3.10) ---
+
+
+@router.post(
+    "/admin/outreach/campaigns/{campaign_id}/scan",
+    response_model=OutreachCampaignRow,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_admin_token)],
+)
+async def admin_start_outreach_scan(
+    campaign_id: str,
+    include_weak: bool = Query(default=False),
+    session: AsyncSession = Depends(get_session),
+) -> OutreachCampaignRow:
+    return await start_scan(session, campaign_id, include_weak=include_weak)
+
+
+@router.post(
+    "/admin/outreach/campaigns/{campaign_id}/pause",
+    response_model=OutreachCampaignRow,
+    dependencies=[Depends(require_admin_token)],
+)
+async def admin_pause_outreach_scan(
+    campaign_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> OutreachCampaignRow:
+    return await pause_scan(session, campaign_id)
+
+
+@router.post(
+    "/admin/outreach/campaigns/{campaign_id}/resume",
+    response_model=OutreachCampaignRow,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_admin_token)],
+)
+async def admin_resume_outreach_scan(
+    campaign_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> OutreachCampaignRow:
+    return await resume_scan(session, campaign_id)
+
+
+@router.get(
+    "/admin/outreach/campaigns/{campaign_id}/scan-progress",
+    response_model=OutreachScanProgress,
+    dependencies=[Depends(require_admin_token)],
+)
+async def admin_outreach_scan_progress(
+    campaign_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> OutreachScanProgress:
+    return await get_scan_progress(session, campaign_id)
